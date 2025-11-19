@@ -1,3 +1,5 @@
+<div align="justify">
+
 # torchPersLay
 
 A PyTorch implementation of **PersLay**, a neural network layer designed for processing persistence diagrams. The original PersLay architecture is currently within the GUDHI library, which provides a TensorFlow implementation.
