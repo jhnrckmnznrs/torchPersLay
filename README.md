@@ -18,7 +18,7 @@ PMLR 108:2786–2796, 2020.
 Package is not yet available in the Python Package Index. You may copy torchPersLay.py in your present working directory by downloading the file itself or cloning this repository:
 
 ```
-git clone https://github.com/jhmrckmnznrs/torchPersLay.git
+git clone https://github.com/jhnrckmnznrs/torchPersLay.git
 ```
 
 ## Example Usage
