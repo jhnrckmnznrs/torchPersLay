@@ -2,7 +2,7 @@
 
 # torchPersLay
 
-torchPersLay is a PyTorch implementation of <a href = "http://proceedings.mlr.press/v108/carriere20a/carriere20a.pdf">PersLay</a>, a neural network layer for processing persistence diagrams in topological data analysis (TDA). The original PersLay architecture is available in <a href = "https://gudhi.inria.fr/python/latest/representations_tflow_itf_ref.html">GUDHI</a>, but only in TensorFlow. This project provides a native, modular, and extensible PyTorch version suitable for modern deep-learning pipelines.
+torchPersLay is a <a href="https://pytorch.org/">PyTorch</a> implementation of <a href = "http://proceedings.mlr.press/v108/carriere20a/carriere20a.pdf">PersLay</a>, a neural network layer for processing persistence diagrams in topological data analysis (TDA). The original PersLay architecture is available in <a href = "https://gudhi.inria.fr/python/latest/representations_tflow_itf_ref.html">GUDHI</a>, but only in TensorFlow. This project provides a native, modular, and extensible PyTorch version suitable for modern deep-learning pipelines.
 
 ## Citation
 
