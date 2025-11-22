@@ -15,11 +15,19 @@ PMLR 108:2786–2796, 2020.
 
 ## Installation
 
-Package is not yet available in the Python Package Index. You may copy torchPersLay.py in your present working directory by downloading the file itself or cloning this repository:
+torchPersLay is now available in the <a href="https://pypi.org/project/torchPersLay/0.1.1/">Python Package Index</a>. You may install it using the following:
+
+```
+pip install torchperslay
+```
+
+Alternatively, you may copy torchPersLay.py in your present working directory by downloading the file itself or cloning this repository:
 
 ```
 git clone https://github.com/jhnrckmnznrs/torchPersLay.git
 ```
+
+Ensure you have the packages imported in the Python file.
 
 ## Example Usage
 
