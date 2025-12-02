@@ -34,6 +34,7 @@ class PowerPerslayWeight(nn.Module):
         weight = self.constant * torch.pow(distance, self.power)
         return weight
 
+
 class GridPerslayWeight(nn.Module):
     """
     This is a class for computing a differentiable weight function for persistence diagram points.
@@ -61,57 +62,7 @@ class GridPerslayWeight(nn.Module):
 
         Returns:
             weight (list of n tensors): list containing the weights of the points in the n persistence diagrams.
-        """class GridPerslayWeight(nn.Module):
-            """
-            This is a class for computing a differentiable weight function for persistence diagram points.
-            This function is defined from an array that contains its values on a 2D grid.
-            """
-
-            def __init__(self, grid, grid_bnds, **kwargs):
-                """
-                Constructor for the GridPerslayWeight class.
-
-                Parameters:
-                    grid (n x n numpy array): grid of values.
-                    grid_bnds (2 x 2 numpy array): boundaries of the grid, of the form [[min_x, max_x], [min_y, max_y]].
-                """
-                super().__init__()
-                self.grid = nn.Parameter(torch.tensor(grid, dtype=torch.float32))
-                self.grid_bnds = grid_bnds
-
-            def forward(self, diagrams):
-                """
-                Apply GridPerslayWeight on a list of persistence diagrams.
-
-                Parameters:
-                    diagrams (list of n tensors of shape (num_points x 2)): list containing n persistence diagrams.
-
-                Returns:
-                    weight (list of n tensors): list containing the weights of the points in the n persistence diagrams.
-                """
-                # grid = torch.from_numpy(self.grid)
-                grid_shape = self.grid.shape
-                weights = []
-
-                for diagram in diagrams:
-                    indices = []
-                    for dim in range(2):
-                        m, M = self.grid_bnds[dim]
-                        coords = diagram[:, dim]
-
-                        # Match TensorFlow scaling (uses grid_shape, NOT grid_shape - 1)
-                        ids = grid_shape[dim] * (coords - m) / (M - m)
-
-                        # Match TensorFlow truncation (TensorFlow cast → truncates toward zero)
-                        ids = ids.to(torch.int32)
-
-                        indices.append(ids)
-
-                    # No clamping → out-of-range indices behave like in TF
-                    weight = self.grid[indices[0], indices[1]]
-                    weights.append(weight)
-
-                return torch.stack(weights, dim=0)
+        """
         # grid = torch.from_numpy(self.grid)
         grid_shape = self.grid.shape
         weights = []
