@@ -1,0 +1,38 @@
+data:
+  diagram_dirs:
+    h0: data/h0_structures90
+    h2: data/h2_structures90
+  targets_csv: data/targets90.csv
+
+model:
+  model_type: multi_perslay_image
+  image_size: [10, 10]
+
+  # Optional: use different resolutions per homology dimension.
+  image_sizes:
+    h0: [10, 10]
+    h2: [10, 10]
+
+  image_bnds: auto
+  bounds_padding_fraction: 0.05
+
+  sigma_x: auto
+  sigma_y: auto
+  sigma_multiplier: 1.0
+
+  hidden_dim: 128
+  weight_type: normalized_learnable_power
+  weight_hidden_dim: 16
+  dropout: 0.1
+
+training:
+  batch_size: 2
+  epochs: 200
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  num_workers: 4
+  resume_from: null
+  resume_optimizer: false
+
+output:
+  run_dir: outputs/h0_h2_regression

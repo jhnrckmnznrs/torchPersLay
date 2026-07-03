@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/perslay/__init__.py
+src/perslay/data.py
+src/perslay/layers.py
+src/perslay/models.py
+src/perslay_local.egg-info/PKG-INFO
+src/perslay_local.egg-info/SOURCES.txt
+src/perslay_local.egg-info/dependency_links.txt
+src/perslay_local.egg-info/requires.txt
+src/perslay_local.egg-info/top_level.txt

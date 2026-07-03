@@ -1,0 +1,31 @@
+data:
+  diagram_dir: data/structures90
+  targets_csv: data/targets90.csv
+model:
+  image_size:
+  - 20
+  - 20
+  image_bnds:
+  - - -4.601992154121399
+    - 27.07172586917877
+  - - 0.019498825073242188
+    - 16.74090723991394
+  bounds_padding_fraction: 0.05
+  sigma_x: 1.978651762008667
+  sigma_y: 1.0448569059371948
+  sigma_multiplier: 1.25
+  hidden_dim: 128
+  weight_type: normalized_learnable_power
+  initial_sigma_x: 1.9796073764562607
+  initial_sigma_y: 1.0450880259275437
+  sigma_source: learned_from_best_validation_checkpoint
+training:
+  batch_size: 2
+  epochs: 150
+  learning_rate: 2.0e-05
+  weight_decay: 0.001
+  num_workers: 4
+  resume_from: null
+  resume_optimizer: false
+output:
+  run_dir: outputs/degree2_regression

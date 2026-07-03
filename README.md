@@ -1,145 +1,162 @@
-<div align="justify">
-
 # torchPersLay
 
-torchPersLay is a <a href="https://pytorch.org/">PyTorch</a> implementation of <a href = "http://proceedings.mlr.press/v108/carriere20a/carriere20a.pdf">PersLay</a>, a neural network layer for processing persistence diagrams in topological data analysis (TDA). The original PersLay architecture is available in <a href = "https://gudhi.inria.fr/python/latest/representations_tflow_itf_ref.html">GUDHI</a>, but only in <a href="https://www.tensorflow.org/">TensorFlow</a>. This project provides a native, modular, and extensible PyTorch version suitable for modern deep-learning pipelines.
+`torchPersLay` is a native [PyTorch](https://pytorch.org/) implementation of **PersLay**, a neural-network layer for persistence diagrams in topological data analysis. The package is published on PyPI as `torchPersLay`; the Python import package is `perslay`.
 
-## Citation
-
-If you use this neural network layer in your research, please cite the original paper:
-
-**PersLay: A Neural Network Layer for Persistence Diagrams and New Graph Topological Signatures**  
-Mathieu Carrière, Frédéric Chazal, Yuichi Ike, Théo Lacombe, Martin Royer, Yuhei Umeda  
-Proceedings of the Twenty-Third International Conference on Artificial Intelligence and Statistics (AISTATS),  
-PMLR 108:2786–2796, 2020.
+This repository focuses on PersLay-style persistence-image features with learnable point weights and Gaussian bandwidths. Earlier DeepSet experiment code has been removed to keep the package focused on the successful PersLay implementation.
 
 ## Installation
 
-torchPersLay is now available in the <a href="https://pypi.org/project/torchPersLay/0.1.1/">Python Package Index</a>. You may install it using the following:
+Install the released package from PyPI:
 
-```
+```bash
 pip install torchperslay
 ```
 
-Alternatively, you may copy torchPersLay.py in your present working directory by downloading the file itself or cloning this repository:
+Install the local repository in editable mode:
 
-```
+```bash
 git clone https://github.com/jhnrckmnznrs/torchPersLay.git
+cd torchPersLay
+pip install -e .
 ```
 
-Ensure you have the packages imported in the Python file.
+To run the experiment scripts in this repository, also install the experiment extra or the repository requirements:
 
-## Example Usage
-
-This example usage is concerned with a simple regression model that uses PersLay as a single hidden layer.
-
-### Import Packages
-
-Import necessary packages. Ensure that all packages are installed in your system.
-
+```bash
+pip install -e ".[experiments]"
+# or
+pip install -r requirements.txt
 ```
-from torchPersLay import *
 
-import gudhi.representations as gdr
-import numpy as np
+## Quick start
+
+The example below builds a PersLay regressor for a small batch of padded persistence diagrams. Diagrams are expected as `(birth, death)` pairs with shape `[batch, num_points, 2]`.
+
+```python
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from sklearn.preprocessing import MinMaxScaler
-```
 
-### Define PersLay Layers
+from perslay import (
+    GaussianPerslayPhi,
+    NormalizedLearnablePowerPerslayWeight,
+    Perslay,
+)
+from perslay.models import FlattenRho
 
-Choose the PersLay layer that you want. Consult the official PersLay documentation for the possible options.
+image_size = [10, 10]
+image_bnds = [[0.0, 1.0], [0.0, 1.0]]  # birth bounds, persistence bounds
 
-```
-constant = 1.0
-power = 0.0
-
-weight = PowerPerslayWeight(constant=constant, power=power)
-rho = nn.Identity()
-
-image_size = (5, 5)
-image_bnds = ((-0.5, 1.5), (-0.5, 1.5))
-variance = 0.1
-
+weight = NormalizedLearnablePowerPerslayWeight(image_bnds=image_bnds)
 phi = GaussianPerslayPhi(
     image_size=image_size,
     image_bnds=image_bnds,
-    variance=variance,
+    sigma_x=0.1,
+    sigma_y=0.1,
+    normalize=False,
 )
 
-perm_op = torch.sum
+perslay = Perslay(
+    weight=weight,
+    phi=phi,
+    perm_op=torch.sum,
+    rho=FlattenRho(),
+)
 
-perslay = Perslay(weight=weight, phi=phi, perm_op=perm_op, rho=rho)
+# Two padded diagrams with three points each.
+diagrams = torch.tensor(
+    [
+        [[0.0, 0.4], [0.2, 0.8], [0.0, 0.0]],
+        [[0.1, 0.5], [0.3, 0.9], [0.4, 0.95]],
+    ],
+    dtype=torch.float32,
+)
+mask = torch.tensor(
+    [
+        [True, True, False],
+        [True, True, True],
+    ]
+)
+
+features = perslay(diagrams, mask=mask)
+print(features.shape)  # torch.Size([2, 100])
 ```
 
-### Import Data
+## Regression models
 
-This is an example data. Import your own data.
+For most regression experiments, use the provided model wrappers:
 
-```
-diagrams = [
-    np.array([[0.0, 4.0], [1.0, 2.0], [3.0, 8.0], [6.0, 8.0]]),
-    np.array([[1.0, 3.0], [2.0, 2.5], [4.0, 7.0], [7.0, 7.5]]),
-]
+```python
+from perslay.models import PerslayRegressor, MultiPerslayRegressor
 
-scaler = gdr.DiagramScaler(use=True, scalers=[([0, 1], MinMaxScaler())])
-diagrams = scaler.fit_transform(diagrams)
-diagrams = torch.from_numpy(np.array(diagrams, dtype=np.float32))
-
-y = torch.tensor([[1.0], [3.0]])
-```
-
-### Define Model
-
-This is the creation of the model. This is a simple example. You may add other layers as usual and/or use known architectures to concatenate feature vectors.
-
-```
-class PersLayRegressor(nn.Module):
-    def __init__(self, perslay, image_size=(5, 5)):
-        super().__init__()
-        self.perslay = perslay
-        feature_dim = image_size[0] * image_size[1]
-
-        self.regressor = nn.Sequential(
-            nn.Linear(feature_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
-
-    def forward(self, diagrams):
-        x = self.perslay(diagrams)       # [B, 5, 5, 1]
-        x = x.view(x.shape[0], -1)       # [B, 25]
-        return self.regressor(x)
-
-model = PersLayRegressor(perslay)
-
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+model = PerslayRegressor(
+    image_size=[20, 20],
+    image_bnds=[[0.0, 1.0], [0.0, 1.0]],
+    sigma_x=0.05,
+    sigma_y=0.05,
+    hidden_dim=128,
+    weight_type="normalized_learnable_power",
+)
 ```
 
-### Train Model
+Available `weight_type` values are:
 
-This is the model training for PyTorch models.
+- `constant`
+- `learnable_power`
+- `normalized_learnable_power`
+- `mlp`
 
+`MultiPerslayRegressor` supports multiple homology dimensions or multiple diagram sources per sample. See `experiments/configs/h0_h2_regression.yaml` for an example configuration.
+
+## Repository layout
+
+```text
+src/perslay/
+  data.py      Dataset and collate utilities for persistence-diagram CSV files
+  layers.py    PersLay layers, feature maps, and point-weight functions
+  models.py    Single-branch and multi-branch PersLay regressors
+
+experiments/
+  train_regression.py       Config-driven regression training script
+  configs/degree2_regression.yaml
+  configs/h0_h2_regression.yaml
 ```
-for epoch in range(100):
-    optimizer.zero_grad()
-    preds = model(diagrams)
-    loss = criterion(preds, y)
-    loss.backward()
-    optimizer.step()
 
-    if (epoch + 1) % 20 == 0:
-        print(f"Epoch {epoch + 1}, Loss = {loss.item():.6f}")
+## Running experiments
+
+Prepare persistence diagram CSV files with columns similar to:
+
+```csv
+birth,death
+0.1,0.4
+0.2,0.8
 ```
 
-### (Optional) Inspect Learned Parameters
+Prepare a target CSV with:
 
-You may optionally see the learned parameters.
+```csv
+filename,target
+sample_001.csv,3.14
+```
 
+Then run:
+
+```bash
+python experiments/train_regression.py --config experiments/configs/degree2_regression.yaml
 ```
-for name, param in perslay.named_parameters():
-    print(name, param.data)
+
+For multi-diagram input, use:
+
+```bash
+python experiments/train_regression.py --config experiments/configs/h0_h2_regression.yaml
 ```
+
+Training writes checkpoints and resolved configs under the configured `output.run_dir`.
+
+## Citation
+
+If you use this package in research, please cite the original PersLay paper:
+
+> Mathieu Carrière, Frédéric Chazal, Yuichi Ike, Théo Lacombe, Martin Royer, and Yuhei Umeda. **PersLay: A Neural Network Layer for Persistence Diagrams and New Graph Topological Signatures.** AISTATS 2020, PMLR 108:2786–2796.
+
+## License
+
+This project is distributed under the MIT License. See `LICENSE` for details.

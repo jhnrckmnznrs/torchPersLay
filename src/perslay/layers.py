@@ -1,9 +1,9 @@
 import math
-import gudhi.representations as gdr
-import numpy as np
+
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
+import torch.nn.functional as F
+
 
 class PowerPerslayWeight(nn.Module):
     """
@@ -33,6 +33,135 @@ class PowerPerslayWeight(nn.Module):
         distance = torch.abs(diagrams[..., 1] - diagrams[..., 0])
         weight = self.constant * torch.pow(distance, self.power)
         return weight
+
+
+class ConstantPerslayWeight(nn.Module):
+    """
+    Constant point weight.
+
+    Every persistence point receives weight 1.
+    This is useful as a baseline to test whether persistence-based weighting helps.
+    """
+
+    def forward(self, diagrams):
+        return torch.ones_like(diagrams[..., 0])
+
+
+class LearnablePowerPerslayWeight(nn.Module):
+    """
+    Learnable persistence-based weight function.
+
+    Weight = scale * (persistence + eps) ** power
+
+    Both scale and power are learned, while constrained to be positive.
+    """
+
+    def __init__(self, init_scale=1.0, init_power=1.0, eps=1e-6):
+        super().__init__()
+        self.raw_scale = nn.Parameter(torch.tensor(float(init_scale)))
+        self.raw_power = nn.Parameter(torch.tensor(float(init_power)))
+        self.eps = eps
+
+    def forward(self, diagrams):
+        birth = diagrams[..., 0]
+        death = diagrams[..., 1]
+        persistence = (death - birth).clamp_min(self.eps)
+
+        scale = F.softplus(self.raw_scale)
+        power = F.softplus(self.raw_power)
+
+        return scale * torch.pow(persistence, power)
+
+
+class MLPPerslayWeight(nn.Module):
+    """
+    Learnable pointwise weight function.
+
+    Takes each persistence point as (birth, persistence) and returns a
+    positive scalar weight.
+    """
+
+    def __init__(self, image_bnds, hidden_dim=16, eps=1e-6):
+        super().__init__()
+
+        self.eps = eps
+
+        mins = torch.tensor(
+            [image_bnds[0][0], image_bnds[1][0]],
+            dtype=torch.float32,
+        )
+        maxs = torch.tensor(
+            [image_bnds[0][1], image_bnds[1][1]],
+            dtype=torch.float32,
+        )
+
+        self.register_buffer("mins", mins)
+        self.register_buffer("ranges", (maxs - mins).clamp_min(eps))
+
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, diagrams):
+        birth = diagrams[..., 0:1]
+        death = diagrams[..., 1:2]
+        persistence = death - birth
+
+        x = torch.cat([birth, persistence], dim=-1)
+
+        # Normalize coordinates to roughly [0, 1] using image bounds.
+        x = (x - self.mins) / self.ranges
+
+        weight = self.net(x).squeeze(-1)
+
+        # Positive weights.
+        return F.softplus(weight)
+
+
+class NormalizedLearnablePowerPerslayWeight(nn.Module):
+    """
+    Learnable persistence-based weight function using normalized persistence.
+
+    Weight = scale * (normalized_persistence + eps) ** power
+
+    Normalizing persistence makes training more stable when raw persistence
+    values have a large range.
+    """
+
+    def __init__(self, image_bnds, init_scale=1.0, init_power=1.0, eps=1e-6):
+        super().__init__()
+
+        self.eps = eps
+
+        pers_min = float(image_bnds[1][0])
+        pers_max = float(image_bnds[1][1])
+
+        self.register_buffer("pers_min", torch.tensor(pers_min, dtype=torch.float32))
+        self.register_buffer(
+            "pers_range",
+            torch.tensor(max(pers_max - pers_min, eps), dtype=torch.float32),
+        )
+
+        # These are raw parameters. softplus keeps scale and power positive.
+        self.raw_scale = nn.Parameter(torch.tensor(float(init_scale)))
+        self.raw_power = nn.Parameter(torch.tensor(float(init_power)))
+
+    def forward(self, diagrams):
+        birth = diagrams[..., 0]
+        death = diagrams[..., 1]
+        persistence = death - birth
+
+        persistence = (persistence - self.pers_min) / self.pers_range
+        persistence = persistence.clamp_min(self.eps)
+
+        scale = torch.nn.functional.softplus(self.raw_scale)
+        power = torch.nn.functional.softplus(self.raw_power)
+
+        return scale * torch.pow(persistence, power)
 
 
 class GridPerslayWeight(nn.Module):
@@ -87,6 +216,7 @@ class GridPerslayWeight(nn.Module):
 
         return torch.stack(weights, dim=0)
 
+
 class GaussianMixturePerslayWeight(nn.Module):
     """
     This is a class for computing a differentiable weight function for persistence diagram points.
@@ -129,114 +259,118 @@ class GaussianMixturePerslayWeight(nn.Module):
 
         return torch.stack(weights, dim=0)
 
+
 class GaussianPerslayPhi(nn.Module):
     """
-    This is a class for computing a transformation function for persistence diagram points.
-    This function turns persistence diagram points into 2D Gaussian functions centered on the points,
-    that are then evaluated on a regular 2D grid.
+    Differentiable persistence-image-style PersLay feature map using
+    learnable anisotropic Gaussian bandwidths.
+
+    Each persistence point is transformed from (birth, death) to
+    (birth, persistence), then evaluated on a regular 2D grid using an
+    anisotropic Gaussian kernel.
+
+    If normalize=False, the Gaussian normalization constant is omitted.
+    In that case, each point contributes peak value 1, and the output is
+    not a probability density.
     """
 
-    def __init__(self, image_size, image_bnds, variance, **kwargs):
+    def __init__(
+        self,
+        image_size,
+        image_bnds,
+        sigma_x,
+        sigma_y=None,
+        normalize=False,
+        eps=1e-6,
+        **kwargs,
+    ):
         """
-        Constructor for the GaussianPerslayPhi class.
-
         Parameters:
-            image_size (int numpy array): number of grid elements on each grid axis, of the form [n_x, n_y].
-            image_bnds (2 x 2 numpy array): boundaries of the grid, of the form [[min_x, max_x], [min_y, max_y]].
-            variance (float): variance of the Gaussian functions.
+            image_size: number of grid elements on each axis, [n_x, n_y]
+            image_bnds: grid bounds [[min_x, max_x], [min_y, max_y]]
+            sigma_x: initial Gaussian bandwidth in the birth direction
+            sigma_y: initial Gaussian bandwidth in the persistence direction.
+                     If None, sigma_y is initialized equal to sigma_x.
+            normalize: whether to include the Gaussian normalization constant
+            eps: small positive constant for numerical stability
         """
         super().__init__()
+
+        if sigma_y is None:
+            sigma_y = sigma_x
+
         self.image_size = image_size
         self.image_bnds = image_bnds
-        self.log_variance = nn.Parameter(torch.log(torch.tensor(variance)))
-        # self.variance = nn.Parameter(torch.tensor(variance, dtype=torch.float32))
+        self.normalize = normalize
+        self.eps = eps
+
+        # Learn log-sigmas so that sigma_x and sigma_y remain positive.
+        self.log_sigma = nn.Parameter(
+            torch.log(torch.tensor([sigma_x, sigma_y], dtype=torch.float32))
+        )
 
         step = [
             (self.image_bnds[i][1] - self.image_bnds[i][0]) / self.image_size[i]
             for i in range(2)
         ]
+
         coords = [
-            torch.arange(self.image_bnds[i][0], self.image_bnds[i][1], step[i])
+            torch.arange(
+                self.image_bnds[i][0],
+                self.image_bnds[i][1],
+                step[i],
+                dtype=torch.float32,
+            )
             for i in range(2)
         ]
-        self.M = torch.meshgrid(*coords, indexing="xy")
-        self.mu = torch.stack(self.M, dim=0)  # (2, image_size[0], image_size[1])
+
+        M = torch.meshgrid(*coords, indexing="xy")
+        mu = torch.stack(M, dim=0)  # [2, grid_y, grid_x]
+
+        # Register as buffer so it moves with .to(device), .cuda(), etc.
+        self.register_buffer("mu", mu)
 
     def forward(self, diagrams):
         """
-        Apply GaussianPerslayPhi on a list of persistence diagrams.
-
         Parameters:
-            diagrams (list of n tensors of shape (num_points x 2)): list containing n persistence diagrams.
+            diagrams: tensor of shape [B, N, 2], containing (birth, death)
 
         Returns:
-            output (list of n tensors of shape (num_points x image_size[0] x image_size[1] x 1)):
-                list containing the evaluations on the 2D grid of the 2D Gaussian functions.
-            output_shape (tuple): shape of the output tensor.
+            output: tensor of shape [B, N, grid_y, grid_x, 1]
+            output_shape: shape of one transformed point, [grid_y, grid_x, 1]
         """
 
-        variance = torch.exp(self.log_variance)
+        # Positive learnable bandwidths.
+        sigma = torch.exp(self.log_sigma).clamp_min(self.eps)
+        sigma_x = sigma[0]
+        sigma_y = sigma[1]
 
         # Transform diagram: (birth, death) -> (birth, persistence)
-        birth = diagrams[..., 0:1]  # [B, N, 1]
-        lifetime = diagrams[..., 1:2] - birth  # [B, N, 1]
-        diagrams_d = torch.cat([birth, lifetime], dim=-1)  # [B, N, 2]
+        birth = diagrams[..., 0:1]
+        persistence = diagrams[..., 1:2] - birth
+        diagrams_d = torch.cat([birth, persistence], dim=-1)  # [B, N, 2]
 
-        # Expand dimensions for broadcasting
-        diagrams_d = diagrams_d.unsqueeze(-1).unsqueeze(-1)  # (num_points, 2, 1, 1)
+        # [B, N, 2, 1, 1]
+        diagrams_d = diagrams_d.unsqueeze(-1).unsqueeze(-1)
 
-        mu = self.mu.unsqueeze(0).unsqueeze(0).squeeze(3)
+        # [1, 1, 2, grid_y, grid_x]
+        mu = self.mu.unsqueeze(0).unsqueeze(0)
 
-        dists = torch.square(diagrams_d - mu) / (2 * torch.square(variance))
-        gauss = torch.exp(-dists.sum(dim=2)) / (2 * math.pi * torch.square(variance))
-        output = gauss.unsqueeze(-1)  # (num_points, image_size[0], image_size[1], 1)
+        dx2 = torch.square(diagrams_d[:, :, 0:1] - mu[:, :, 0:1])
+        dy2 = torch.square(diagrams_d[:, :, 1:2] - mu[:, :, 1:2])
 
-        output_shape = self.M[0].shape + tuple([1])
+        exponent = -(dx2 / (2.0 * sigma_x.square()) + dy2 / (2.0 * sigma_y.square()))
+
+        gauss = torch.exp(exponent).squeeze(2)  # [B, N, grid_y, grid_x]
+
+        if self.normalize:
+            gauss = gauss / (2.0 * math.pi * sigma_x * sigma_y)
+
+        output = gauss.unsqueeze(-1)  # [B, N, grid_y, grid_x, 1]
+        output_shape = self.mu[0].shape + (1,)
+
         return output, output_shape
 
-class TentPerslayPhi(nn.Module):
-    """
-    This is a class for computing a transformation function for persistence diagram points.
-    This function turns persistence diagram points into 1D tent functions centered on the points,
-    that are then evaluated on a regular 1D grid.
-    """
-
-    def __init__(self, samples, **kwargs):
-        """
-        Constructor for the TentPerslayPhi class.
-
-        Parameters:
-            samples (float numpy array): grid elements on which to evaluate the tent functions, of the form [x_1, ..., x_n].
-        """
-        super().__init__()
-        self.samples = nn.Parameter(torch.tensor(samples, dtype=torch.float32))
-
-    def forward(self, diagrams):
-        """
-        Apply TentPerslayPhi on a list of persistence diagrams.
-
-        Parameters:
-            diagrams (list of n tensors of shape (num_points x 2)): list containing n persistence diagrams.
-
-        Returns:
-            output (list of n tensors of shape (num_points x num_samples)):
-                list containing the evaluations on the 1D grid of the 1D tent functions.
-            output_shape (tuple): shape of the output tensor.
-        """
-        samples_d = self.samples.unsqueeze(0).unsqueeze(0)  # (1, 1, num_samples)
-
-        outputs = []
-        for diagram in diagrams:
-            xs = diagram[:, 0:1]  # (num_points, 1)
-            ys = diagram[:, 1:2]  # (num_points, 1)
-            output = torch.maximum(
-                0.5 * (ys - xs) - torch.abs(samples_d - 0.5 * (ys + xs)),
-                torch.tensor(0.0),
-            )
-            outputs.append(output.squeeze(1))  # (num_points, num_samples)
-
-        output_shape = self.samples.shape
-        return torch.stack(outputs, dim=0), output_shape
 
 class FlatPerslayPhi(nn.Module):
     """
@@ -286,6 +420,7 @@ class FlatPerslayPhi(nn.Module):
         output_shape = self.samples.shape
         return torch.stack(outputs, dim=0), output_shape
 
+
 class Perslay(nn.Module):
     """
     Vectorizes persistence diagrams in a differentiable way, implementing PersLay.
@@ -306,39 +441,43 @@ class Perslay(nn.Module):
         self.perm_op = perm_op
         self.rho = rho
 
-    def forward(self, diagrams):
+    def forward(self, diagrams, mask=None):
         """
         Parameters:
             diagrams: tensor of shape [B, N, 2], padded if necessary
+            mask: optional boolean tensor of shape [B, N].
+                  True means real persistence point; False means padding.
 
         Returns:
             vector: tensor of shape [B, output_dim] representing PersLay embeddings
         """
-        # phi should return (vector, dim) like in TF version
-        # vector: [B, N, ...] or [B, N, grid_x, grid_y, 1]
         vector, dim = self.phi(diagrams)
-        weightTensor = self.weight(diagrams)
-        # weight broadcasting: match vector dims from 2 onwards
-        for _ in range(vector.ndim - weightTensor.ndim):
-            weightTensor = weightTensor.unsqueeze(-1)
-        vector = vector * weightTensor
+        weight_tensor = self.weight(diagrams)
 
-        # Apply permutation invariant operation
-        permop = self.perm_op
-        if isinstance(permop, str) and permop[:3] == "top":
-            k = int(permop[3:])
-            # Flatten spatial dimensions if necessary
-            vector = vector.view(
-                vector.shape[0], vector.shape[1], -1
-            )  # [B, N, features]
-            # Take top-k along the point axis
+        if mask is not None:
+            weight_tensor = weight_tensor * mask.to(weight_tensor.dtype)
+
+        for _ in range(vector.ndim - weight_tensor.ndim):
+            weight_tensor = weight_tensor.unsqueeze(-1)
+
+        vector = vector * weight_tensor
+
+        perm_op = self.perm_op
+
+        if isinstance(perm_op, str) and perm_op[:3] == "top":
+            k = int(perm_op[3:])
+
+            vector = vector.view(vector.shape[0], vector.shape[1], -1)
+
+            if mask is not None:
+                mask_expanded = mask.unsqueeze(-1).expand_as(vector)
+                vector = vector.masked_fill(~mask_expanded, float("-inf"))
+
             topk_vals, _ = torch.topk(vector.transpose(1, 2), k=k, dim=2)
             vector = topk_vals.reshape(vector.shape[0], -1)
         else:
-            # Apply perm_op along points axis (axis=1)
-            vector = permop(vector, dim=1)
+            vector = perm_op(vector, dim=1)
 
-        # Apply postprocessing function rho
         vector = self.rho(vector)
 
         return vector

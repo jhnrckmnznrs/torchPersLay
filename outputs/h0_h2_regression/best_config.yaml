@@ -1,0 +1,61 @@
+data:
+  diagram_dirs:
+    h0: data/h0_structures90
+    h2: data/h2_structures90
+  targets_csv: data/targets90.csv
+model:
+  model_type: multi_perslay_image
+  image_size:
+  - 10
+  - 10
+  image_sizes:
+    h0:
+    - 10
+    - 10
+    h2:
+    - 10
+    - 10
+  image_bnds:
+    h0:
+    - - -12.695353507995605
+      - 23.604491233825684
+    - - 0.023273468017578125
+      - 38.591379165649414
+    h2:
+    - - -4.601992154121399
+      - 27.07172586917877
+    - - 0.019498825073242188
+      - 16.74090723991394
+  bounds_padding_fraction: 0.05
+  sigma_x: auto
+  sigma_y: auto
+  sigma_multiplier: 1.0
+  hidden_dim: 128
+  weight_type: normalized_learnable_power
+  weight_hidden_dim: 16
+  dropout: 0.1
+  learned_sigmas:
+    h0:
+      sigma_x: 3.575622320175171
+      sigma_y: 3.7687981128692627
+    h2:
+      sigma_x: 3.096284866333008
+      sigma_y: 1.6502835750579834
+  initial_sigmas:
+    h0:
+      sigma_x: 3.629984474182129
+      sigma_y: 3.8568105697631836
+    h2:
+      sigma_x: 3.167371802330017
+      sigma_y: 1.67214084148407
+  sigma_source: learned_from_best_validation_checkpoint_per_branch
+training:
+  batch_size: 2
+  epochs: 200
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  num_workers: 4
+  resume_from: null
+  resume_optimizer: false
+output:
+  run_dir: outputs/h0_h2_regression

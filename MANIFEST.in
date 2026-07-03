@@ -1,0 +1,9 @@
+include LICENSE
+include README.md
+include requirements.txt
+recursive-include experiments *.py *.yaml
+prune outputs
+prune data
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod]
