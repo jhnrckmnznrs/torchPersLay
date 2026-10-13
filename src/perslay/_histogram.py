@@ -109,28 +109,200 @@ def _looks_continuous(diagrams):
             and torch.unique(ps).numel()>0.96*ps.numel())
 
 
-def try_histogram(phi,diagrams,weights,*,mode="auto",plan=None,max_cells=131072,
-                  max_bytes=32*1024*1024):
-    """Return a histogram result or None to request the exact fused fallback."""
-    B,N=diagrams.shape[:2]
-    if B==0 or N==0 or diagrams.requires_grad:
-        return None
+def try_histogram(phi, diagrams, weights, *, mode="auto", plan=None,
+                  max_cells=131072, max_bytes=32*1024*1024):
+    """Select exact coordinate grouping or request the fused fallback.
+
+    Automatic dispatch sorts each coordinate axis only once, then chooses a
+    dense histogram or sparse occupied-pair representation using cost bounds.
+    """
+    B, N = diagrams.shape[:2]
     if plan is not None:
-        return evaluate_histogram(phi,diagrams,weights,plan)
-    if mode=="auto" and (B*N<512 or _looks_continuous(diagrams)):
+        if isinstance(plan, CoordinatePairPlan):
+            return evaluate_coordinate_pairs(phi, diagrams, weights, plan)
+        if isinstance(plan, HistogramPlan):
+            return evaluate_histogram(phi, diagrams, weights, plan)
+        raise TypeError("Expected HistogramPlan or CoordinatePairPlan")
+    if B == 0 or N == 0 or diagrams.requires_grad:
         return None
-    try:
-        plan=prepare_histogram(diagrams,max_cells=max_cells,max_bytes=max_bytes)
-    except ValueError as exc:
-        if str(exc) in ("Dense histogram exceeds size limit", "Empty diagrams should use the fused backend"):
+    if mode == "histogram":
+        try:
+            return evaluate_histogram(phi, diagrams, weights,
+                prepare_histogram(diagrams, max_cells=max_cells, max_bytes=max_bytes))
+        except ValueError as exc:
+            if str(exc) == "Dense histogram exceeds size limit":
+                return None
+            raise
+    if mode == "pairs":
+        try:
+            sparse = prepare_coordinate_pairs(diagrams, max_bytes=max_bytes)
+        except ValueError as exc:
+            if str(exc) == "Sparse coordinate pairs exceed size limit":
+                return None
+            raise
+        if not _pair_runtime_safe(phi, B, N, sparse.pair_count,
+                                  diagrams.element_size(), max_bytes, mode=mode):
             return None
-        raise
-    if mode=="auto":
-        ux,uy=plan.birth_values.numel(),plan.persistence_values.numel()
-        nx,ny=phi.image_size
-        cost=min(B*(ny*uy*ux+ny*ux*nx),B*(uy*ux*nx+ny*uy*nx))
-        # Cheap enough to group only when it is clearly less expensive than
-        # the full pointwise separable Gaussian reduction.
-        if cost*2>B*N*nx*ny:
-            return None
-    return evaluate_histogram(phi,diagrams,weights,plan)
+        return evaluate_coordinate_pairs(phi, diagrams, weights, sparse)
+    if mode != "auto" or B * N < 512 or _looks_continuous(diagrams):
+        return None
+
+    # One pair of axis sorts supports either exact aggregation layout.
+    dense = None
+    sparse = None
+    with torch.no_grad():
+        birth = diagrams[..., 0].reshape(-1)
+        persistence = (diagrams[..., 1] - diagrams[..., 0]).reshape(-1)
+        if not bool(torch.isfinite(diagrams).all()):
+            raise ValueError("Active persistence points must be finite")
+        ux, ix = torch.unique(birth, sorted=True, return_inverse=True)
+        uy, iy = torch.unique(persistence, sorted=True, return_inverse=True)
+        cells = ux.numel() * uy.numel()
+        nx, ny = phi.image_size
+        dense_ok = (cells <= max_cells and
+                    B * cells * diagrams.element_size() <= max_bytes)
+        if dense_ok:
+            work = min(B * (ny * uy.numel() * ux.numel() + ny * ux.numel() * nx),
+                       B * (uy.numel() * ux.numel() * nx + ny * uy.numel() * nx))
+            if work * 2 <= B * N * nx * ny:
+                bidx = torch.arange(B, device=diagrams.device).repeat_interleave(N)
+                flat = bidx * cells + iy * ux.numel() + ix
+                dense = HistogramPlan(diagrams.detach().clone(), ux, uy, flat, B, N)
+
+        # The Cartesian product is expensive or sparsely occupied. Encode
+        # exactly occupied coordinate pairs without another axis sort.
+        if dense is None:
+            packed = ix + ux.numel() * iy
+            pairs, inverse = torch.unique(packed, sorted=True, return_inverse=True)
+            K = pairs.numel()
+            required_bytes = ((diagrams.numel() + 2 * K) * diagrams.element_size()
+                              + (B * N + B * K) * 8)
+            if K > 16384 or required_bytes > max_bytes:
+                return None
+            if not _pair_runtime_safe(phi, B, N, K, diagrams.element_size(),
+                                      max_bytes, mode=mode):
+                return None
+            bidx = torch.arange(B, device=diagrams.device).repeat_interleave(N)
+            flat = bidx * K + inverse
+            sparse = CoordinatePairPlan(diagrams.detach().clone(), ux[pairs % ux.numel()],
+                            uy[torch.div(pairs, ux.numel(), rounding_mode='floor')],
+                            flat, B, N)
+    if dense is not None:
+        return evaluate_histogram(phi, diagrams, weights, dense)
+    return evaluate_coordinate_pairs(phi, diagrams, weights, sparse)
+
+
+@dataclass(frozen=True)
+class CoordinatePairPlan:
+    """Reusable exact grouping of identical (birth, persistence) coordinate pairs.
+
+    No learned parameters are cached. Diagrams must remain fixed, although point
+    weights, bandwidths and learned pixel edges remain fully differentiable.
+    """
+    coordinates: torch.Tensor
+    births: torch.Tensor
+    persistences: torch.Tensor
+    flat_indices: torch.Tensor
+    batch_size: int
+    points_per_diagram: int
+
+    @property
+    def pair_count(self):
+        return self.births.numel()
+
+    def validate(self, diagrams):
+        if diagrams.requires_grad:
+            raise ValueError("Coordinate grouping does not differentiate input coordinates")
+        if (diagrams.shape != self.coordinates.shape
+                or diagrams.device != self.coordinates.device
+                or diagrams.dtype != self.coordinates.dtype
+                or not torch.equal(diagrams, self.coordinates)):
+            raise ValueError("Coordinate-pair plan is stale: rebuild when diagrams or masks change")
+
+
+def prepare_coordinate_pairs(diagrams, mask=None, *, max_pairs=16384,
+                             max_bytes=32 * 1024 * 1024):
+    """Group identical birth/persistence pairs without allocating a dense grid.
+
+    The integer encoding is injective: (birth_id, persistence_id) is mapped to
+    birth_id + unique_birth_count * persistence_id. Floating-point values are
+    never rounded or quantized. A boolean mask can replace invalid padding.
+    """
+    if diagrams.ndim != 3 or diagrams.shape[-1] != 2:
+        raise ValueError("diagrams must be [B,N,2]")
+    if diagrams.requires_grad:
+        raise ValueError("Coordinate grouping does not differentiate input coordinates")
+    if not isinstance(max_pairs, int) or max_pairs < 1:
+        raise ValueError("max_pairs must be positive")
+    if not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    if mask is not None:
+        if mask.dtype != torch.bool or mask.shape != diagrams.shape[:2]:
+            raise ValueError("mask must be boolean [B,N]")
+        diagrams = torch.where(mask.unsqueeze(-1), diagrams, 0.0)
+    if not bool(torch.isfinite(diagrams).all()):
+        raise ValueError("Active persistence points must be finite")
+    B, N, _ = diagrams.shape
+    if not B or not N:
+        raise ValueError("Empty diagrams should use the fused backend")
+    with torch.no_grad():
+        birth = diagrams[..., 0].reshape(-1)
+        persistence = (diagrams[..., 1] - diagrams[..., 0]).reshape(-1)
+        ux, ix = torch.unique(birth, sorted=True, return_inverse=True)
+        uy, iy = torch.unique(persistence, sorted=True, return_inverse=True)
+        n_birth = ux.numel()
+        # Integer pack avoids a slower two-dimensional floating-point sort.
+        packed = ix + n_birth * iy
+        pairs, inverse = torch.unique(packed, sorted=True, return_inverse=True)
+        K = pairs.numel()
+        # Include the snapshot, per-point indices, and grouped scalar weights.
+        required_bytes = (diagrams.numel() + 2 * K) * diagrams.element_size() \
+                         + (B * N + B * K) * 8
+        if K > max_pairs or required_bytes > max_bytes:
+            raise ValueError("Sparse coordinate pairs exceed size limit")
+        bidx = torch.arange(B, device=diagrams.device).repeat_interleave(N)
+        flat = bidx * K + inverse
+        return CoordinatePairPlan(diagrams.detach().clone(), ux[pairs % n_birth],
+                                  uy[torch.div(pairs, n_birth, rounding_mode='floor')],
+                                  flat, B, N)
+
+
+def evaluate_coordinate_pairs(phi, diagrams, weights, plan):
+    """Differentiable evaluation of an exact coordinate-pair plan."""
+    plan.validate(diagrams)
+    if weights.shape != diagrams.shape[:2]:
+        raise ValueError("weights must have shape [B,N]")
+    if weights.device != diagrams.device or weights.dtype != diagrams.dtype:
+        raise ValueError("weights must share diagram dtype and device")
+    B, K = plan.batch_size, plan.pair_count
+    xe, ye = phi.grid_edges() if hasattr(phi, 'grid_edges') else (phi.x_edges, phi.y_edges)
+    sx, sy = phi._sigmas()
+    X = phi._normal_interval_masses(xe, plan.births.unsqueeze(0), sx).squeeze(0)
+    Y = phi._normal_interval_masses(ye, plan.persistences.unsqueeze(0), sy).squeeze(0)
+    H = weights.new_zeros(B * K).index_add(0, plan.flat_indices, weights.reshape(-1)).view(B, K)
+    # Multiply point weights into the smaller axis factor, then use batched GEMM.
+    nx, ny = phi.image_size
+    if nx <= ny:
+        values = torch.bmm(Y.T.expand(B, -1, -1), X.unsqueeze(0) * H.unsqueeze(-1))
+    else:
+        values = torch.bmm((Y.unsqueeze(0) * H.unsqueeze(-1)).transpose(1, 2),
+                           X.unsqueeze(0).expand(B, -1, -1))
+    if not phi.normalize:
+        values = values * (2 * math.pi * sx * sy)
+    return phi._format_aggregated_output(values)
+
+
+def _pair_runtime_safe(phi, B, N, K, element_size, max_bytes, *, mode):
+    nx, ny = phi.image_size
+    # Upper bound for X, Y, weighted factors and H, not including output.
+    factor_bytes = (K * (nx + ny) + B * K * (min(nx, ny) + 1)) * element_size
+    if factor_bytes > max_bytes:
+        return False
+    # Avoid an expensive grouping path on nearly all-unique diagrams. The
+    # grouping overhead is substantial, hence the conservative 4x threshold.
+    if mode == 'auto':
+        pair_work = B * K * nx * ny
+        fused_work = B * N * nx * ny
+        if pair_work * 4 >= fused_work or B * N < 512:
+            return False
+    return True

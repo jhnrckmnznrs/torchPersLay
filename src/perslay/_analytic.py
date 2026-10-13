@@ -87,18 +87,14 @@ class AnalyticFusedIntegrated(torch.autograd.Function):
                 if ye.numel()>2:
                     dye[1:-1] += ((dY[...,:-1]-dY[...,1:])*py[...,1:-1]).sum(dim=(0,1))
             if not ctx.normalize:
-                # derivative of 2*pi*sx*sy prefactor; g features = g*prefactor
-                # P_scaled=gout normalized, but extra from actual forward out
-                # unnorm_out = prefactor * normalized P
-                o_norm=b.new_zeros((B,ye.numel()-1,xe.numel()-1))
-                for a in range(0,N,c):
-                    sl=slice(a,min(a+c,N))
-                    X=axis_masses(xe,b[:,sl],sx)
-                    Y=axis_masses(ye,p[:,sl],sy)
-                    o_norm += torch.bmm(Y.transpose(1,2),X*w[:,sl,None])
-                extra=(g*o_norm).sum()
-                dsx+=extra*(2*math.pi*sy)
-                dsy+=extra*(2*math.pi*sx)
+                # The prefactor's contribution is recovered without another
+                # complete Gaussian reduction: dw is already the gradient of
+                # the weighted, unnormalized image w.r.t. the point weights.
+                # Therefore (w * dw).sum() == <g, output>, up to summation
+                # order, by linearity of the weighted image in w.
+                prefactor_vjp=(w*dw).sum()
+                dsx+=prefactor_vjp/sx
+                dsy+=prefactor_vjp/sy
         return db,dp,dw,dsx,dsy,dxe,dye,None,None
 
 

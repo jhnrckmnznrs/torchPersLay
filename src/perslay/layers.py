@@ -687,8 +687,8 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
             raise ValueError("backward_backend must be 'autograd' or 'analytic'")
         if backward_backend == "analytic" and checkpoint_chunks:
             raise ValueError("analytical backward and checkpoint_chunks are mutually exclusive")
-        if aggregation_backend not in ("fused", "auto", "histogram"):
-            raise ValueError("aggregation_backend must be fused, auto or histogram")
+        if aggregation_backend not in ("fused", "auto", "histogram", "pairs"):
+            raise ValueError("aggregation_backend must be fused, auto, histogram or pairs")
         self.aggregation_backend = aggregation_backend
         self.backward_backend = backward_backend
 

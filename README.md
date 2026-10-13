@@ -51,19 +51,22 @@ Use `feature_map_type="integrated"` for fixed pixel boundaries, `"grid_sampled"`
 Pixel-integrated Gaussian images have separable responses, so their weighted sum can be evaluated as `Y.T @ diag(weights) @ X` without constructing a `[batch, points, height, width]` tensor. All exact backends compute the same mathematical features; floating-point accumulation orders can differ.
 
 - **`aggregation_backend="fused"`** (default): separable pointwise reduction; robust for arbitrary continuous diagrams.
-- **`aggregation_backend="auto"`**: groups identical birth and persistence coordinate values if doing so is estimated to be cheaper. It checks cardinality and avoids excessive dense-histogram allocations; otherwise it uses the fused path.
-- **`aggregation_backend="histogram"`**: explicitly attempts coordinate grouping, subject to the same memory safety limit; falls back when grouping would exceed that limit.
+- **`aggregation_backend="auto"`**: selects a dense coordinate histogram or sparse grouping of exact birth–persistence pairs if its cost and memory limits indicate an advantage; otherwise uses the fused path. The two coordinate axes are sorted only once.
+- **`aggregation_backend="histogram"`**: attempts dense coordinate grouping, subject to the memory limit.
+- **`aggregation_backend="pairs"`**: attempts grouping by occupied coordinate pairs without constructing the Cartesian-product histogram. Both explicit grouping modes fall back to fused computation if their safety limits are exceeded.
 
-Coordinate grouping uses exact floating-point equality, **never rounding**. It does not group diagram coordinates that require input gradients; that case uses the fused backend. The dynamic grouping path is bypassed under `torch.compile` in favor of the fused backend.
+Coordinate grouping uses exact floating-point equality, **never rounding**. Identical birth–persistence pairs are evaluated only once while retaining differentiability of weights, bandwidths and learned grid boundaries. It does not group diagrams whose coordinates require gradients; those use the fused backend. Dynamic grouping is bypassed under `torch.compile` in favor of the fused backend.
 
 ### Reuse fixed-diagram coordinate grouping
 
 When the same diagram tensor is reused across training steps, calculate the grouping once. Learned weights, Gaussian bandwidths, and grid boundaries are still updated on every step:
 
 ```python
-from perslay import prepare_histogram
+from perslay import prepare_coordinate_pairs, prepare_histogram
 
-plan = prepare_histogram(diagrams)  # optional: mask=boolean_mask
+# Use prepare_histogram() for a compact Cartesian-product grid.
+# Use prepare_coordinate_pairs() when relatively few distinct pairs occur.
+plan = prepare_coordinate_pairs(diagrams)  # optional: mask=boolean_mask
 for step in range(10):
     model.zero_grad(set_to_none=True)
     prediction = model(diagrams, histogram_plan=plan)
@@ -71,11 +74,11 @@ for step in range(10):
     # optimizer.step() with your optimizer
 ```
 
-A plan checks the exact diagram coordinates, shape, device, and dtype before use. After changing diagrams, padding masks, preprocessing, or device/dtype, build a new plan. The cache stores **no model parameters** and is not saved in `state_dict`. The default preparation limit is 131,072 histogram cells and 32 MiB per batch; over-limit diagrams should use the regular fused backend. For masks, pass `mask` both when preparing the plan and when calling the model.
+A plan checks the exact diagram coordinates, shape, device, and dtype before use. After changing diagrams, padding masks, preprocessing, or device/dtype, build a new plan. The cache stores **no model parameters** and is not saved in `state_dict`. Dense preparation defaults to at most 131,072 histogram cells and 32 MiB per batch. Sparse pair preparation defaults to at most 16,384 distinct pairs and a 32 MiB plan budget, with an additional runtime-memory guard in automatic dispatch. Over-limit diagrams should use the regular fused backend. For masks, pass `mask` both when preparing the plan and when calling the model.
 
 ### Backward options
 
-For integrated Gaussian maps, choose `backward_backend="autograd"` (default) or `"analytic"`. Analytical backward recomputes compact Gaussian factors, reducing saved activations and supporting first-order reverse-mode derivatives. It does not currently support double backward or `torch.func`; use autograd for those. `checkpoint_chunks=True` with an explicit `chunk_size` is another memory-saving choice when using autograd.
+For integrated Gaussian maps, choose `backward_backend="autograd"` (default) or `"analytic"`. Analytical backward recomputes compact Gaussian factors, reducing saved activations and supporting first-order reverse-mode derivatives. It does not currently support double backward or `torch.func`; use autograd for those. The unnormalized analytical path reuses its existing weight gradient to evaluate the Gaussian scale-factor derivative, avoiding a redundant pass. `checkpoint_chunks=True` with an explicit `chunk_size` is another memory-saving choice when using autograd.
 
 ## CPU benchmarks
 
@@ -87,6 +90,8 @@ A synthetic 4-diagram, 8,192-point-per-diagram workload with an 80 × 80 learnab
 | Discrete coordinates, automatic histogram | 5.5 ms |
 | Discrete coordinates, cached histogram | 2.6 ms |
 | Continuous coordinates, analytical fused | 109 ms |
+
+A separate correlated-coordinate benchmark (4 diagrams × 8,192 points, 512 distinct pairs, 80 × 80 grid, four CPU threads) measured about 84–90 ms for fused analytical backward, 8–10 ms for automatic sparse-pair dispatch, and 3–5 ms per step for cached pairs (approximately 5 ms one-time preparation). On continuous inputs, automatic dispatch fell back to fused computation with comparable runtime.
 
 The cached times exclude one-time grouping preparation. Results depend strongly on actual distinct coordinate counts, bandwidths, CPU and thread settings; these are not general speed guarantees. On small cached workloads, **one CPU thread can be faster than several**. CUDA-specific performance has not been validated.
 
