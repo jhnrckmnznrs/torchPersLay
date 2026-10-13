@@ -667,6 +667,7 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
         eps=1e-6,
         checkpoint_chunks=False,
         backward_backend="autograd",
+        aggregation_backend="fused",
         **kwargs,
     ):
         super().__init__(
@@ -686,6 +687,9 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
             raise ValueError("backward_backend must be 'autograd' or 'analytic'")
         if backward_backend == "analytic" and checkpoint_chunks:
             raise ValueError("analytical backward and checkpoint_chunks are mutually exclusive")
+        if aggregation_backend not in ("fused", "auto", "histogram"):
+            raise ValueError("aggregation_backend must be fused, auto or histogram")
+        self.aggregation_backend = aggregation_backend
         self.backward_backend = backward_backend
 
         nx, ny = self.image_size
@@ -773,7 +777,18 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
             y_values.transpose(1, 2), x_values * weights.unsqueeze(-1)
         )
 
-    def weighted_sum(self, diagrams, weights):
+    def weighted_sum(self, diagrams, weights, histogram_plan=None):
+        """Aggregate using separable kernels or exact coordinate grouping."""
+        # Dynamic unique/sort are not supported by the compiled full graph.
+        if (histogram_plan is not None or self.aggregation_backend != "fused") and not getattr(getattr(torch, "compiler", None), "is_compiling", lambda: False)():
+            from ._histogram import try_histogram
+            result = try_histogram(self, diagrams, weights,
+                 mode=self.aggregation_backend, plan=histogram_plan)
+            if result is not None:
+                return result
+        return self._weighted_sum_fused(diagrams, weights)
+
+    def _weighted_sum_fused(self, diagrams, weights):
         """Exactly aggregate canonical persistence images in bounded memory."""
         if diagrams.ndim != 3 or diagrams.shape[-1] != 2:
             raise ValueError("diagrams must have shape [B, N, 2]")
@@ -859,6 +874,7 @@ class LearnableGridIntegratedGaussianPerslayPhi(IntegratedGaussianPerslayPhi):
         eps=1e-6,
         checkpoint_chunks=False,
         backward_backend="autograd",
+        aggregation_backend="fused",
         **kwargs,
     ):
         min_cell_fraction = float(min_cell_fraction)
@@ -884,6 +900,7 @@ class LearnableGridIntegratedGaussianPerslayPhi(IntegratedGaussianPerslayPhi):
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
             backward_backend=backward_backend,
+            aggregation_backend=aggregation_backend,
             eps=eps,
         )
 
@@ -1027,7 +1044,7 @@ class Perslay(nn.Module):
         self.perm_op = perm_op
         self.rho = rho
 
-    def forward(self, diagrams, mask=None):
+    def forward(self, diagrams, mask=None, histogram_plan=None):
         """Embed batched birth/death diagrams with an optional padding mask.
 
         Only unmasked finite points are meaningful. Padded slots are replaced
@@ -1049,7 +1066,12 @@ class Perslay(nn.Module):
         # Gaussian separability permits much smaller intermediate tensors for
         # both sum and masked mean; other reductions retain the generic path.
         if self.perm_op in (torch.sum, torch.mean) and hasattr(self.phi, "weighted_sum"):
-            vector = self.phi.weighted_sum(diagrams, weight_tensor)
+            if histogram_plan is None:
+                vector = self.phi.weighted_sum(diagrams, weight_tensor)
+            else:
+                if not isinstance(self.phi, IntegratedGaussianPerslayPhi):
+                    raise ValueError("histogram plans require integrated Gaussian features")
+                vector = self.phi.weighted_sum(diagrams, weight_tensor, histogram_plan)
             if self.perm_op is torch.mean:
                 counts = (
                     mask.sum(dim=1) if mask is not None
@@ -1058,6 +1080,8 @@ class Perslay(nn.Module):
                 vector = vector / counts.clamp_min(1).to(vector.dtype).view(-1, 1, 1, 1)
             return self.rho(vector)
 
+        if histogram_plan is not None:
+            raise ValueError("histogram plans require integrated Gaussian sum or mean")
         vector, _ = self.phi(diagrams)
         for _ in range(vector.ndim - weight_tensor.ndim):
             weight_tensor = weight_tensor.unsqueeze(-1)

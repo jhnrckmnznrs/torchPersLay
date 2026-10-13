@@ -63,6 +63,7 @@ def make_perslay_phi(
     grid_regularization_strength=0.0,
     checkpoint_chunks=False,
     backward_backend="autograd",
+    aggregation_backend="fused",
 ):
     common = {
         "image_size": image_size,
@@ -99,6 +100,7 @@ def make_perslay_phi(
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
             backward_backend=backward_backend,
+            aggregation_backend=aggregation_backend,
         )
     if feature_map_type == "integrated_learnable_grid":
         return LearnableGridIntegratedGaussianPerslayPhi(
@@ -108,6 +110,7 @@ def make_perslay_phi(
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
             backward_backend=backward_backend,
+            aggregation_backend=aggregation_backend,
             min_cell_fraction=min_cell_fraction,
             grid_regularization_strength=grid_regularization_strength,
         )
@@ -138,6 +141,7 @@ class PerslayRegressor(nn.Module):
         grid_regularization_strength=0.0,
         checkpoint_chunks=False,
         backward_backend="autograd",
+        aggregation_backend="fused",
     ):
         super().__init__()
         weight = make_perslay_weight(
@@ -158,6 +162,7 @@ class PerslayRegressor(nn.Module):
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
             backward_backend=backward_backend,
+            aggregation_backend=aggregation_backend,
             min_cell_fraction=min_cell_fraction,
             grid_regularization_strength=grid_regularization_strength,
         )
@@ -179,8 +184,8 @@ class PerslayRegressor(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, diagrams, mask=None):
-        x = self.perslay(diagrams, mask=mask)
+    def forward(self, diagrams, mask=None, histogram_plan=None):
+        x = self.perslay(diagrams, mask=mask, histogram_plan=histogram_plan)
         y = self.regressor(x).squeeze(-1)
         return y
 
@@ -224,6 +229,7 @@ class MultiPerslayRegressor(nn.Module):
         dropout=0.0,
         checkpoint_chunks=False,
         backward_backend="autograd",
+        aggregation_backend="fused",
     ):
         super().__init__()
 
@@ -249,6 +255,7 @@ class MultiPerslayRegressor(nn.Module):
                 chunk_size=cfg.get("chunk_size", chunk_size),
                 checkpoint_chunks=cfg.get("checkpoint_chunks", checkpoint_chunks),
                 backward_backend=cfg.get("backward_backend", backward_backend),
+                aggregation_backend=cfg.get("aggregation_backend", aggregation_backend),
                 min_cell_fraction=cfg.get(
                     "min_cell_fraction", min_cell_fraction
                 ),
@@ -269,7 +276,7 @@ class MultiPerslayRegressor(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, diagrams, mask=None):
+    def forward(self, diagrams, mask=None, histogram_plans=None):
         features = []
 
         for name in self.branch_names:
@@ -280,6 +287,7 @@ class MultiPerslayRegressor(nn.Module):
             x = self.branches[name](
                 diagrams[name],
                 mask=branch_mask,
+                histogram_plan=(histogram_plans or {}).get(name),
             )
 
             features.append(x)

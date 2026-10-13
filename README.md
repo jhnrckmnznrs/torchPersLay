@@ -1,529 +1,105 @@
 # torchPersLay
 
-`torchPersLay` is a native [PyTorch](https://pytorch.org/) implementation of **PersLay**, a neural-network layer for persistence diagrams in topological data analysis. The package is published on PyPI as `torchPersLay`; the Python import package is `perslay`.
+**Differentiable persistence-diagram layers in PyTorch.**
 
-This repository focuses on PersLay representations with learnable point weights, Gaussian bandwidths, and exact persistence-image integration. Version 0.4 adds a globally learnable nonuniform persistence-image grid on top of the fused operators introduced in version 0.3. The library separates four Gaussian feature maps:
+`torchPersLay` transforms batches of persistence diagrams into fixed-size, trainable features for neural networks. The import name is `perslay`. It supports point-weight functions, Gaussian persistence surfaces, exact pixel-integrated persistence images, globally learnable nonuniform pixel boundaries, masking, and simple single-/multi-branch regression models.
 
-- `GridSampledGaussianPerslayPhi`: Gaussian surface values at pixel centres;
-- `IntegratedGaussianPerslayPhi`: exact Gaussian mass integrated over a fixed pixel grid;
-- `LearnableGridIntegratedGaussianPerslayPhi`: exact Gaussian mass integrated over a globally learned nonuniform pixel grid; and
-- `GaussianPerslayPhi`: the pre-0.2 boundary-grid implementation retained for checkpoint compatibility.
+## Install
 
-The distinction matters: centre samples represent local surface heights, whereas integrated pixels represent regional Gaussian mass.
-
-When either explicit Gaussian map is used with `perm_op=torch.sum`, `Perslay`
-automatically exploits Gaussian separability. It evaluates only one-dimensional
-birth and persistence factors and contracts them with a batched matrix
-multiplication instead of materializing a `[batch, points, ny, nx]` tensor.
-This is mathematically equivalent to the pointwise construction and supports
-exact point chunking through `chunk_size` for very large diagrams.
-
-## Installation
-
-Install the released package from PyPI:
+To install the current source directly from GitHub:
 
 ```bash
-pip install torchperslay
+pip install 'git+https://github.com/jhnrckmnznrs/torchPersLay.git'
 ```
 
-Install the local repository in editable mode:
+The PyPI distribution uses the same project name (`torchPersLay`), but the GitHub source may contain improvements not yet uploaded to PyPI.
 
-```bash
-git clone https://github.com/jhnrckmnznrs/torchPersLay.git
-cd torchPersLay
-pip install -e .
-```
+Requires Python 3.9 or newer and PyTorch. The package includes no datasets, trained checkpoints, or experiment outputs.
 
-To run the experiment scripts in this repository, also install the experiment extra or the repository requirements:
-
-```bash
-pip install -e ".[experiments]"
-# or
-pip install -r requirements.txt
-```
-
-## Quick start
-
-The example below builds a PersLay regressor for a small batch of padded persistence diagrams. Diagrams are expected as `(birth, death)` pairs with shape `[batch, num_points, 2]`.
+## Basic usage
 
 ```python
 import torch
-
-from perslay import (
-    ConstantPerslayWeight,
-    GridSampledGaussianPerslayPhi,
-    Perslay,
-)
-from perslay.models import FlattenRho
-
-image_size = [10, 10]
-image_bnds = [[0.0, 1.0], [0.0, 1.0]]  # birth bounds, persistence bounds
-
-weight = ConstantPerslayWeight()
-phi = GridSampledGaussianPerslayPhi(
-    image_size=image_size,
-    image_bnds=image_bnds,
-    sigma_x=0.1,
-    sigma_y=0.1,
-    normalize=False,
-    learnable_sigma=True,
-    flatten_order="legacy-x-major",
-    chunk_size=4096,  # optional; bounds peak memory for large diagrams
-)
-
-perslay = Perslay(
-    weight=weight,
-    phi=phi,
-    perm_op=torch.sum,
-    rho=FlattenRho(),
-)
-
-# Two padded diagrams with three points each.
-diagrams = torch.tensor(
-    [
-        [[0.0, 0.4], [0.2, 0.8], [0.0, 0.0]],
-        [[0.1, 0.5], [0.3, 0.9], [0.4, 0.95]],
-    ],
-    dtype=torch.float32,
-)
-mask = torch.tensor(
-    [
-        [True, True, False],
-        [True, True, True],
-    ]
-)
-
-features = perslay(diagrams, mask=mask)
-print(features.shape)  # torch.Size([2, 100])
-```
-
-With constant weights, sum aggregation, centre coordinates, omitted Gaussian
-normalization, and `legacy-x-major` flattening, this matches the mathematical
-construction of the Rust grid-sampled persistence surface. Setting
-`normalize=True` adds `1 / (2*pi*sigma_x*sigma_y)` but still returns point
-samples rather than pixel integrals.
-
-For canonical integrated persistence-image pixels, replace the feature map by:
-
-```python
-from perslay import IntegratedGaussianPerslayPhi
-
-phi = IntegratedGaussianPerslayPhi(
-    image_size=[10, 10],
-    image_bnds=[[0.0, 1.0], [0.0, 1.0]],
-    sigma_x=0.1,
-    sigma_y=0.1,
-    normalize=True,
-    learnable_sigma=True,
-    flatten_order="row-major",
-    chunk_size=4096,
-)
-```
-
-`chunk_size=None` processes all points in one fused contraction. A positive
-integer processes points in additive chunks. Chunking changes only the order
-of floating-point additions, not the mathematical representation. The generic
-materialized PersLay path remains available for non-sum permutation operators.
-
-
-## Learnable nonuniform persistence-image grids
-
-`LearnableGridIntegratedGaussianPerslayPhi` keeps the outer birth/persistence
-bounds and the number of pixels fixed but learns the internal pixel boundaries.
-The grid is **global**: one set of learned boundaries is shared by every diagram
-processed by the layer.
-
-```python
-from perslay import LearnableGridIntegratedGaussianPerslayPhi
-
-phi = LearnableGridIntegratedGaussianPerslayPhi(
-    image_size=[20, 20],
-    image_bnds=[[0.0, 1.0], [0.0, 1.0]],
-    sigma_x=0.05,
-    sigma_y=0.05,
-    normalize=True,
-    learnable_sigma=True,
-    min_cell_fraction=0.05,
-    grid_regularization_strength=1e-3,
-)
-
-x_edges, y_edges = phi.grid_edges()       # differentiable tensors
-x_widths, y_widths = phi.grid_width_fractions()
-penalty = phi.regularization_loss()       # add to the task loss if desired
-```
-
-For an axis with `n` cells and trainable logits `theta`, normalized widths are
-
-```text
-q = r / n + (1 - r) * softmax(theta)
-```
-
-where `r=min_cell_fraction`. Zero logits give exactly the ordinary uniform
-grid. The minimum-width floor prevents cells from collapsing, while cumulative
-sums of `q` guarantee that boundaries remain ordered and the outer bounds never
-move.
-
-The construction is differentiable because a pixel mass has the form
-
-```text
-Phi((x_right - birth) / sigma) - Phi((x_left - birth) / sigma).
-```
-
-Differentiating with respect to a shared boundary evaluates the Gaussian
-density at that boundary: the same infinitesimal mass is removed from one cell
-and added to its neighbour. Thus standard backpropagation can move grid
-boundaries without hard bin assignment. `grid_regularization()` returns a
-dimensionless squared deviation from uniform cell widths; the configured
-`regularization_loss()` is zero at uniform initialization.
-
-## Regression models
-
-For most regression experiments, use the provided model wrappers:
-
-```python
-from perslay.models import PerslayRegressor, MultiPerslayRegressor
+from perslay import PerslayRegressor
 
 model = PerslayRegressor(
-    image_size=[20, 20],
-    image_bnds=[[0.0, 1.0], [0.0, 1.0]],
-    sigma_x=0.05,
-    sigma_y=0.05,
-    hidden_dim=128,
-    weight_type="constant",
-    feature_map_type="grid_sampled",
-    normalize=False,
-    learnable_sigma=True,
-    flatten_order="legacy-x-major",
-    chunk_size=4096,
+    image_size=[24, 24],
+    image_bnds=[[0.0, 1.0], [0.0, 1.0]],  # birth and persistence ranges
+    sigma_x=0.08,
+    sigma_y=0.08,
+    weight_type="learnable_power",
+    feature_map_type="integrated_learnable_grid",
+    normalize=True,
+    backward_backend="analytic",       # optional memory-saving first-order VJP
+    aggregation_backend="auto",         # exact histogram if beneficial
 )
+
+# Each point is [birth, death]; masked padded points are ignored.
+diagrams = torch.tensor([
+    [[0.1, 0.4], [0.2, 0.6]],
+    [[0.0, 0.3], [0.3, 0.7]],
+])
+result = model(diagrams)
+loss = result.square().mean() + model.regularization_loss()
+loss.backward()
 ```
 
-Available `weight_type` values are:
+Use `feature_map_type="integrated"` for fixed pixel boundaries, `"grid_sampled"` for Gaussian centre samples, and `"legacy_gaussian"` for the original PersLay-style grid map. The canonical image uses **birth/persistence** coordinates even though the input diagrams use **birth/death** coordinates.
 
-- `constant`
-- `persistence`
-- `linear_ramp` (also supply `weight_threshold`)
-- `learnable_power`
-- `normalized_learnable_power`
-- `mlp`
+## Exact computation backends
 
-Available `feature_map_type` values are:
+Pixel-integrated Gaussian images have separable responses, so their weighted sum can be evaluated as `Y.T @ diag(weights) @ X` without constructing a `[batch, points, height, width]` tensor. All exact backends compute the same mathematical features; floating-point accumulation orders can differ.
 
-- `grid_sampled`: pixel-centre surface values;
-- `integrated`: exact pixel integrals on a fixed grid;
-- `integrated_learnable_grid`: exact pixel integrals on a global learned nonuniform grid; and
-- `legacy_gaussian`: the pre-0.2 boundary-grid behavior.
+- **`aggregation_backend="fused"`** (default): separable pointwise reduction; robust for arbitrary continuous diagrams.
+- **`aggregation_backend="auto"`**: groups identical birth and persistence coordinate values if doing so is estimated to be cheaper. It checks cardinality and avoids excessive dense-histogram allocations; otherwise it uses the fused path.
+- **`aggregation_backend="histogram"`**: explicitly attempts coordinate grouping, subject to the same memory safety limit; falls back when grouping would exceed that limit.
 
-For `grid_sampled` or `integrated`, set `learnable_sigma=False` to hold the
-specified bandwidths fixed. Trainable bandwidths remain positive through a
-logarithmic parameterization.
+Coordinate grouping uses exact floating-point equality, **never rounding**. It does not group diagram coordinates that require input gradients; that case uses the fused backend. The dynamic grouping path is bypassed under `torch.compile` in favor of the fused backend.
 
-## Performance
+### Reuse fixed-diagram coordinate grouping
 
-The fused Gaussian sum reduces the dominant intermediate from approximately
-`B * N * nx * ny` values to `B * C * (nx + ny)` values, where `C` is the
-configured chunk size, or `N` when unchunked. Version 0.3.1 also removes an
-unnecessary unchunked accumulator and reduces elementwise work in the sampled
-Gaussian factors. The integrated representation uses tail-stable Gaussian
-interval formulas that retain both values and gradients at numerically
-difficult pixel boundaries.
-
-Run the retained materialized implementation against the fused eager path with:
-
-```bash
-python benchmarks/benchmark_gaussian_aggregation.py --device cpu --threads 5
-python benchmarks/benchmark_gaussian_aggregation.py --device cuda --points 10000
-```
-
-For a fixed-shape workload, benchmark TorchInductor as well:
-
-```bash
-python benchmarks/benchmark_gaussian_aggregation.py \
-  --device cuda --points 10000 --compile --compile-mode reduce-overhead
-```
-
-The benchmark verifies numerical agreement before timing. Compilation time is
-reported separately and excluded from steady-state timing. `torch.compile` is
-intentionally opt-in: compilation has a first-call cost, and the speedup depends
-on device, representation, diagram length, and shape stability. For training,
-you can compile the complete model directly:
+When the same diagram tensor is reused across training steps, calculate the grouping once. Learned weights, Gaussian bandwidths, and grid boundaries are still updated on every step:
 
 ```python
-model = torch.compile(model, fullgraph=True, mode="reduce-overhead")
+from perslay import prepare_histogram
+
+plan = prepare_histogram(diagrams)  # optional: mask=boolean_mask
+for step in range(10):
+    model.zero_grad(set_to_none=True)
+    prediction = model(diagrams, histogram_plan=plan)
+    prediction.square().mean().backward()
+    # optimizer.step() with your optimizer
 ```
 
-On the development CPU (PyTorch 2.10, float32, 5 threads), with batch size 8,
-5,000 points per diagram, and a `30 x 20` grid, representative eager runs kept
-the fused sampled operator around an order of magnitude faster than explicit
-materialization and the fused integrated operator around 3x faster. The
-dominant intermediate estimate for this case falls from about 91.6 MiB to
-7.6 MiB when unchunked. These numbers are environment-specific; use the
-included benchmark for any performance claim.
+A plan checks the exact diagram coordinates, shape, device, and dtype before use. After changing diagrams, padding masks, preprocessing, or device/dtype, build a new plan. The cache stores **no model parameters** and is not saved in `state_dict`. The default preparation limit is 131,072 histogram cells and 32 MiB per batch; over-limit diagrams should use the regular fused backend. For masks, pass `mask` both when preparing the plan and when calling the model.
 
-`chunk_size` is also a tuning parameter rather than only a memory limit. A
-moderate chunk can improve CPU cache locality on large diagrams, while very
-small chunks add Python/kernel-launch overhead. Keep `chunk_size=None` as the
-general default and benchmark representative values such as 512, 2048, and
-8192 on the target CPU/GPU before freezing an experiment configuration.
+### Backward options
 
-CUDA peak temporary allocation is reported automatically when the benchmark is
-run with `--device cuda`. This release candidate was validated in a CPU-only
-environment, so GPU speed and memory numbers should be measured on the target
-CUDA system before publication.
+For integrated Gaussian maps, choose `backward_backend="autograd"` (default) or `"analytic"`. Analytical backward recomputes compact Gaussian factors, reducing saved activations and supporting first-order reverse-mode derivatives. It does not currently support double backward or `torch.func`; use autograd for those. `checkpoint_chunks=True` with an explicit `chunk_size` is another memory-saving choice when using autograd.
 
-## Repository layout
+## CPU benchmarks
 
-```text
-src/perslay/
-  data.py      Dataset and collate utilities for persistence-diagram CSV files
-  layers.py    PersLay layers, feature maps, and point-weight functions
-  models.py    Single-branch and multi-branch PersLay regressors
+A synthetic 4-diagram, 8,192-point-per-diagram workload with an 80 × 80 learnable grid and four CPU threads gave these illustrative median forward+backward times (PyTorch 2.10 CPU, 4 timed steps after warmup):
 
-experiments/
-  train_regression.py       Config-driven regression training script
-  configs/degree2_regression.yaml
-  configs/grid_sampled_regression.yaml
-  configs/integrated_regression.yaml
-  configs/h0_h2_regression.yaml
+| Input / backend | Median step time |
+|---|---:|
+| Discrete coordinates, analytical fused | 104 ms |
+| Discrete coordinates, automatic histogram | 5.5 ms |
+| Discrete coordinates, cached histogram | 2.6 ms |
+| Continuous coordinates, analytical fused | 109 ms |
 
-benchmarks/
-  benchmark_gaussian_aggregation.py
-```
+The cached times exclude one-time grouping preparation. Results depend strongly on actual distinct coordinate counts, bandwidths, CPU and thread settings; these are not general speed guarantees. On small cached workloads, **one CPU thread can be faster than several**. CUDA-specific performance has not been validated.
 
-## Running experiments
-
-Prepare persistence diagram CSV files with columns similar to:
-
-```csv
-birth,death
-0.1,0.4
-0.2,0.8
-```
-
-Prepare a target CSV with:
-
-```csv
-filename,target
-sample_001.csv,3.14
-```
-
-Then run:
+## Test and develop
 
 ```bash
-python experiments/train_regression.py --config experiments/configs/degree2_regression.yaml
+pip install -e .
+pip install pytest
+pytest -q
 ```
 
-To run the explicit centre-sampled model:
+The tests cover Gaussian output and gradient agreement, differentiability of learned grid boundaries and bandwidths, numerical edge cases, masking, cached-plan invalidation, full models, checkpoint loading, and PyTorch compilation smoke tests. The compact source tree intentionally excludes large datasets, saved model weights, and generated outputs.
 
-```bash
-python experiments/train_regression.py \
-  --config experiments/configs/grid_sampled_regression.yaml
-```
+## License and citation
 
-The sampled and integrated example configurations both use a `15 x 15` grid,
-zero padding, normalized Gaussian kernels, row-major flattening, and normalized
-learnable-power point weights. They differ only in centre sampling versus exact
-pixel integration. Bandwidths are initialized from pixel sizes and then
-learned. Use `learnable_sigma: false` for a fixed-bandwidth ablation. The Rust-
-compatible unnormalized, constant-weight setup is shown separately in the
-quick-start example above.
-
-Run the matched integrated example with:
-
-```bash
-python experiments/train_regression.py \
-  --config experiments/configs/integrated_regression.yaml
-```
-
-For multi-diagram input, use:
-
-```bash
-python experiments/train_regression.py --config experiments/configs/h0_h2_regression.yaml
-```
-
-Training writes checkpoints and resolved configs under the configured `output.run_dir`.
-
-### Synthetic apparent-modulus study
-
-The manuscript experiment uses repeated grouped cross-validation rather than
-the simple random split in `train_regression.py`. Baseline, uniformly thinned,
-and locally weakened siblings sharing a `structure_XXXX` identifier always
-remain in the same fold. See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the expected
-data layout, complete commands, resumption behavior, and analysis steps.
-
-Run a short validation experiment before starting the full study:
-
-```bash
-python experiments/cross_validate_bone_modulus_perslay.py \
-  --data-root data \
-  --output-dir outputs/feature_map_smoke \
-  --variants baseline uniform weakened \
-  --folds 2 --repeats 1 --epochs 3 --patience 2 \
-  --models variant_residual \
-  --dimension-sets h0 \
-  --feature-map-types grid_sampled integrated \
-  --gaussian-normalization normalized \
-  --flatten-order row-major \
-  --device auto
-```
-
-For the controlled sampled-versus-integrated comparison, use identical
-Gaussian normalization and vector ordering so that the discretization is the
-intended difference:
-
-```bash
-python experiments/cross_validate_bone_modulus_perslay.py \
-  --data-root data \
-  --output-dir outputs/bone_modulus_discretization_comparison \
-  --variants baseline uniform weakened \
-  --folds 5 --repeats 10 \
-  --models variant_residual \
-  --dimension-sets h0 h2 h0_h2 \
-  --feature-map-types grid_sampled integrated \
-  --gaussian-normalization normalized \
-  --flatten-order row-major \
-  --learnable-sigma \
-  --image-size 10 10 \
-  --bounds-padding-fraction 0.05 \
-  --sigma-multiplier 1.0 \
-  --weight-type normalized_learnable_power \
-  --hidden-dimension 128 --dropout 0.10 \
-  --batch-size 4 --epochs 300 --patience 40 \
-  --learning-rate 0.0005 --weight-decay 0.0001 \
-  --random-seed 2026 \
-  --device auto
-```
-
-To compare each representation in its conventional form instead, replace
-`--gaussian-normalization normalized` and `--flatten-order row-major` with:
-
-```bash
---gaussian-normalization representation-default \
---flatten-order representation-default
-```
-
-The representation defaults are an unnormalized, legacy-x-major
-centre-sampled surface and a normalized, row-major pixel-integrated image.
-Both feature maps use the same grouped folds and the same initialization seed
-within each fold. The resolved choices are written to `config.json`, every
-per-fold `result.json`, and the output CSV files.
-
-Compare their repeated out-of-fold predictions with a structure-level paired
-bootstrap:
-
-```bash
-python experiments/compare_bone_modulus_feature_maps.py \
-  --cv-output outputs/bone_modulus_discretization_comparison \
-  --model perslay_variant_residual \
-  --dimension-set h0_h2 \
-  --feature-map-types grid_sampled integrated \
-  --bootstrap 5000 \
-  --seed 2026
-```
-
-Analyze one representation against the variant-aware BV/TV baseline with:
-
-```bash
-python experiments/analyze_bone_modulus_cv.py \
-  --cv-output outputs/bone_modulus_discretization_comparison \
-  --output-dir outputs/bone_modulus_discretization_comparison/post_analysis_integrated \
-  --model perslay_variant_residual \
-  --dimension-set h0_h2 \
-  --feature-map-type integrated \
-  --baseline variant_bvtv \
-  --bootstrap 5000 \
-  --seed 2026
-```
-
-Reusing the same output directory resumes incomplete runs. Use a new output
-directory for an independent rerun. `--overwrite-output` deliberately removes
-the selected output directory, while `--retrain-existing` retrains completed
-per-fold runs without deleting other files.
-
-## Citation
-
-If you use this package in research, please cite the original PersLay paper:
-
-> Mathieu Carrière, Frédéric Chazal, Yuichi Ike, Théo Lacombe, Martin Royer, and Yuhei Umeda. **PersLay: A Neural Network Layer for Persistence Diagrams and New Graph Topological Signatures.** AISTATS 2020, PMLR 108:2786–2796.
-
-## License
-
-This project is distributed under the MIT License. See `LICENSE` for details.
-
-
-## v0.4.1: memory-aware training on CPU
-
-The explicit Gaussian feature maps support optional non-reentrant activation
-checkpointing of the fused point-chunk matrix products. Supply both an explicit
-chunk size and `checkpoint_chunks=True`:
-
-```python
-from perslay import IntegratedGaussianPerslayPhi
-
-phi = IntegratedGaussianPerslayPhi(
-    image_size=[20, 20],
-    image_bnds=[[0.0, 1.0], [0.0, 1.0]],
-    sigma_x=0.05,
-    sigma_y=0.05,
-    chunk_size=128,
-    checkpoint_chunks=True,
-)
-```
-
-This affects training/backward only; inference does not need checkpointing.
-Checkpointing recomputes intermediate factors during backpropagation, usually
-lowering saved activation memory at the expense of additional runtime. The
-optimal chunk size depends on the device, batch, number of points, and grid.
-The same settings can be passed to `PerslayRegressor`, `MultiPerslayRegressor`,
-or `make_perslay_phi` for `grid_sampled`, `integrated`, and
-`integrated_learnable_grid` feature maps. Legacy Gaussian maps are unchanged.
-
-Input CSV datasets drop non-finite points (including essential infinite-death
-classes) and nonpositive-persistence pairs. Padding masks are boolean `True`
-for valid points. All-masked batches produce zeros, and masked mean divides by
-the number of real points. Do not use non-finite **unmasked** points; model them
-separately or preprocess them before calling the layer.
-
-A small CPU-only benchmark is available:
-
-```bash
-PYTHONPATH=src python benchmarks/benchmark_checkpoint_memory.py
-```
-
-CPU benchmark outcomes and validation limitations are recorded in
-[`VALIDATION_0.4.1.md`](VALIDATION_0.4.1.md).
-
-
-## Optional exact analytical backward (v0.5.0)
-
-For the `integrated` and `integrated_learnable_grid` feature maps, the optional
-`backward_backend="analytic"` avoids retaining intermediate Gaussian factors
-for reverse-mode differentiation. It computes first-order derivatives of diagram
-coordinates, point weights, Gaussian bandwidths, and learned grid edges via an
-analytic vector-Jacobian product. **The mathematical persistence image is
-unchanged**, aside from floating-point summation-order effects.
-
-```python
-from perslay import LearnableGridIntegratedGaussianPerslayPhi
-phi = LearnableGridIntegratedGaussianPerslayPhi(
-    image_size=[80, 80], image_bnds=[[0, 1], [0, 1]],
-    sigma_x=0.1, sigma_y=0.07,
-    backward_backend="analytic", chunk_size=2048,
-)
-# phi.weighted_sum(diagrams, point_weights) uses the optimized reverse pass.
-```
-
-`PerslayRegressor` and `MultiPerslayRegressor` also accept
-`backward_backend="analytic"`; their default remains `"autograd"`.
-Setting `checkpoint_chunks=True` simultaneously with the analytical backend
-raises `ValueError`. With no explicit `chunk_size`, analytical backward uses
-at most 2048 points per recomputation chunk.
-
-**Limitations:** First-order reverse-mode gradients only (no double backward),
-no `torch.func` transforms, no CUDA or AMP validation at the time of this release
-candidate. For higher-order differentiation, `torch.func`, or unsupported
-configurations, choose `backward_backend="autograd"` explicitly. The backend
-is not embedded in `state_dict`, so weights remain interoperable.
-
-The experimental Chebyshev approximation is kept separately from the exact
-release candidate because its error depends strongly on Gaussian bandwidth.
+MIT license; see `LICENSE`. For the underlying PersLay construction, cite Carrière, Chazal, Ike, Lacombe, Royer and Umeda (2020), *PersLay: A Neural Network Layer for Persistence Diagrams*, AISTATS / PMLR 108.

@@ -5,6 +5,7 @@ try:
 except ImportError:  # pragma: no cover
     from importlib_metadata import version
 
+from ._histogram import HistogramPlan, prepare_histogram
 from .data import (
     MultiPersistenceDiagramDataset,
     PersistenceDiagramDataset,
@@ -41,10 +42,12 @@ from .models import (
 try:
     __version__ = version("torchPersLay")
 except Exception:  # pragma: no cover
-    __version__ = "0.5.0"
+    __version__ = "0.6.0"
 
 __all__ = [
     "__version__",
+    "HistogramPlan",
+    "prepare_histogram",
     "PersistenceDiagramDataset",
     "MultiPersistenceDiagramDataset",
     "collate_persistence_diagrams",
