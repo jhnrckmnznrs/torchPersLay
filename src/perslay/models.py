@@ -62,6 +62,7 @@ def make_perslay_phi(
     min_cell_fraction=0.05,
     grid_regularization_strength=0.0,
     checkpoint_chunks=False,
+    backward_backend="autograd",
 ):
     common = {
         "image_size": image_size,
@@ -72,6 +73,8 @@ def make_perslay_phi(
     }
 
     if feature_map_type == "legacy_gaussian":
+        if backward_backend != "autograd":
+            raise ValueError("analytical backward supports integrated Gaussian maps only")
         if not learnable_sigma:
             raise ValueError(
                 "legacy_gaussian always has learnable bandwidths; use "
@@ -79,6 +82,8 @@ def make_perslay_phi(
             )
         return GaussianPerslayPhi(**common)
     if feature_map_type == "grid_sampled":
+        if backward_backend != "autograd":
+            raise ValueError("analytical backward supports integrated Gaussian maps only")
         return GridSampledGaussianPerslayPhi(
             **common,
             learnable_sigma=learnable_sigma,
@@ -93,6 +98,7 @@ def make_perslay_phi(
             flatten_order=flatten_order,
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
+            backward_backend=backward_backend,
         )
     if feature_map_type == "integrated_learnable_grid":
         return LearnableGridIntegratedGaussianPerslayPhi(
@@ -101,6 +107,7 @@ def make_perslay_phi(
             flatten_order=flatten_order,
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
+            backward_backend=backward_backend,
             min_cell_fraction=min_cell_fraction,
             grid_regularization_strength=grid_regularization_strength,
         )
@@ -130,6 +137,7 @@ class PerslayRegressor(nn.Module):
         min_cell_fraction=0.05,
         grid_regularization_strength=0.0,
         checkpoint_chunks=False,
+        backward_backend="autograd",
     ):
         super().__init__()
         weight = make_perslay_weight(
@@ -149,6 +157,7 @@ class PerslayRegressor(nn.Module):
             flatten_order=flatten_order,
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
+            backward_backend=backward_backend,
             min_cell_fraction=min_cell_fraction,
             grid_regularization_strength=grid_regularization_strength,
         )
@@ -214,6 +223,7 @@ class MultiPerslayRegressor(nn.Module):
         grid_regularization_strength=0.0,
         dropout=0.0,
         checkpoint_chunks=False,
+        backward_backend="autograd",
     ):
         super().__init__()
 
@@ -238,6 +248,7 @@ class MultiPerslayRegressor(nn.Module):
                 flatten_order=cfg.get("flatten_order", flatten_order),
                 chunk_size=cfg.get("chunk_size", chunk_size),
                 checkpoint_chunks=cfg.get("checkpoint_chunks", checkpoint_chunks),
+                backward_backend=cfg.get("backward_backend", backward_backend),
                 min_cell_fraction=cfg.get(
                     "min_cell_fraction", min_cell_fraction
                 ),
