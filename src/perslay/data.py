@@ -7,6 +7,24 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Subset
 
 
+def _load_finite_persistence_diagram(path):
+    """Load only finite points with positive persistence, including empty CSVs.
+
+    Essential classes with infinite death require a separate representation;
+    they must not be fed into finite Gaussian persistence-image kernels.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="loadtxt: input contained no data")
+        diagram = np.loadtxt(
+            path, delimiter=",", skiprows=1, usecols=(0, 1), dtype=np.float32
+        )
+    diagram = np.asarray(diagram, dtype=np.float32).reshape(-1, 2)
+    keep = np.isfinite(diagram).all(axis=1) & (diagram[:, 1] > diagram[:, 0])
+    return torch.from_numpy(diagram[keep].copy())
+
+
 class PersistenceDiagramDataset(Dataset):
     """
     Dataset for persistence diagrams stored as CSV files.
@@ -44,18 +62,7 @@ class PersistenceDiagramDataset(Dataset):
     def __getitem__(self, idx):
         path = self.files[idx]
 
-        diagram = np.loadtxt(
-            path,
-            delimiter=",",
-            skiprows=1,
-            usecols=(0, 1),
-            dtype=np.float32,
-        )
-
-        if diagram.ndim == 1:
-            diagram = diagram[None, :]
-
-        diagram = torch.from_numpy(diagram)
+        diagram = _load_finite_persistence_diagram(path)
         target = torch.tensor(self.targets[path.name], dtype=torch.float32)
 
         return diagram, target, path.name
@@ -102,28 +109,7 @@ class MultiPersistenceDiagramDataset(Dataset):
         return len(self.files)
 
     def _load_diagram(self, path):
-        diagram = np.loadtxt(
-            path,
-            delimiter=",",
-            skiprows=1,
-            usecols=(0, 1),
-            dtype=np.float32,
-        )
-
-        if diagram.ndim == 1:
-            diagram = diagram[None, :]
-
-        # Important for H0: remove essential classes with death = inf.
-        diagram = diagram[np.isfinite(diagram).all(axis=1)]
-
-        # Optional but usually sensible: remove non-positive persistence.
-        persistence = diagram[:, 1] - diagram[:, 0]
-        diagram = diagram[persistence > 0.0]
-
-        if diagram.shape[0] == 0:
-            diagram = np.zeros((0, 2), dtype=np.float32)
-
-        return torch.from_numpy(diagram.astype(np.float32))
+        return _load_finite_persistence_diagram(path)
 
     def __getitem__(self, idx):
         filename = self.files[idx]
@@ -205,11 +191,14 @@ def collate_persistence_diagrams(batch):
 
     lengths = torch.tensor([d.shape[0] for d in diagrams], dtype=torch.long)
 
-    diagrams_padded = pad_sequence(
-        diagrams,
-        batch_first=True,
-        padding_value=0.0,
-    )
+    if int(lengths.max().item()) == 0:
+        diagrams_padded = torch.zeros(len(diagrams), 1, 2, dtype=torch.float32)
+    else:
+        diagrams_padded = pad_sequence(
+            diagrams,
+            batch_first=True,
+            padding_value=0.0,
+        )
 
     max_len = diagrams_padded.shape[1]
     mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
@@ -261,7 +250,11 @@ def compute_diagram_bounds(
 
         birth = diagram[:, 0]
         death = diagram[:, 1]
-        persistence = death - birth
+        valid = torch.isfinite(diagram).all(dim=1) & (death > birth)
+        if not bool(valid.any()):
+            continue
+        birth = birth[valid]
+        persistence = (death - diagram[:, 0])[valid]
 
         birth_values.append(birth)
         persistence_values.append(persistence)
@@ -281,6 +274,8 @@ def compute_diagram_bounds(
     pers_max = persistence_values.max().item()
 
     birth_range = birth_max - birth_min
+    if pers_max < pers_min:
+        raise ValueError("persistence_min exceeds the largest finite persistence")
     pers_range = pers_max - pers_min
 
     # Avoid zero-width bounds if all values are identical.

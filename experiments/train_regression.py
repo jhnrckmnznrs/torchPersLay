@@ -86,6 +86,22 @@ def get_learned_sigmas(model):
     return None
 
 
+def get_sigma_trainability(model):
+    """Return whether Gaussian bandwidths are trainable for each feature map."""
+    if hasattr(model, "branches"):
+        values = {}
+        for name, branch in model.branches.items():
+            if hasattr(branch, "phi") and hasattr(branch.phi, "log_sigma"):
+                values[name] = bool(
+                    getattr(branch.phi, "sigma_is_learnable", True)
+                )
+        return values if values else None
+
+    if hasattr(model, "perslay") and hasattr(model.perslay.phi, "log_sigma"):
+        return bool(getattr(model.perslay.phi, "sigma_is_learnable", True))
+    return None
+
+
 def make_resolved_config(config, image_bnds, sigma_x_init, sigma_y_init, model):
     """
     Create a config-like dictionary with resolved preprocessing/model values.
@@ -99,6 +115,7 @@ def make_resolved_config(config, image_bnds, sigma_x_init, sigma_y_init, model):
     resolved_config["model"]["image_bnds"] = serialize_image_bnds(image_bnds)
 
     learned_sigmas = get_learned_sigmas(model)
+    sigma_trainability = get_sigma_trainability(model)
 
     if learned_sigmas is None:
         resolved_config["model"]["sigma_source"] = "not_applicable"
@@ -112,6 +129,7 @@ def make_resolved_config(config, image_bnds, sigma_x_init, sigma_y_init, model):
             }
             for name, (sigma_x, sigma_y) in learned_sigmas.items()
         }
+        resolved_config["model"]["sigma_trainable"] = sigma_trainability
 
         resolved_config["model"]["initial_sigmas"] = {}
 
@@ -122,9 +140,14 @@ def make_resolved_config(config, image_bnds, sigma_x_init, sigma_y_init, model):
                     "sigma_y": float(sigma_y_init[name]),
                 }
 
-        resolved_config["model"]["sigma_source"] = (
-            "learned_from_best_validation_checkpoint_per_branch"
-        )
+        trainable_values = list(sigma_trainability.values())
+        if all(trainable_values):
+            sigma_source = "learned_from_best_validation_checkpoint_per_branch"
+        elif not any(trainable_values):
+            sigma_source = "fixed_per_branch"
+        else:
+            sigma_source = "mixed_fixed_and_learnable_per_branch"
+        resolved_config["model"]["sigma_source"] = sigma_source
 
     else:
         learned_sigma_x, learned_sigma_y = learned_sigmas
@@ -133,8 +156,11 @@ def make_resolved_config(config, image_bnds, sigma_x_init, sigma_y_init, model):
         resolved_config["model"]["sigma_y"] = learned_sigma_y
         resolved_config["model"]["initial_sigma_x"] = float(sigma_x_init)
         resolved_config["model"]["initial_sigma_y"] = float(sigma_y_init)
+        resolved_config["model"]["sigma_trainable"] = sigma_trainability
         resolved_config["model"]["sigma_source"] = (
             "learned_from_best_validation_checkpoint"
+            if sigma_trainability
+            else "fixed_from_config"
         )
 
     return resolved_config
@@ -401,6 +427,15 @@ def main():
             hidden_dim=config["model"]["hidden_dim"],
             weight_type=config["model"].get("weight_type", "learnable_power"),
             weight_hidden_dim=config["model"].get("weight_hidden_dim", 16),
+            weight_threshold=config["model"].get("weight_threshold", 1.0),
+            feature_map_type=config["model"].get(
+                "feature_map_type", "legacy_gaussian"
+            ),
+            normalize=config["model"].get("normalize", False),
+            learnable_sigma=config["model"].get("learnable_sigma", True),
+            flatten_order=config["model"].get(
+                "flatten_order", "legacy-x-major"
+            ),
         ).to(device)
 
     elif model_type == "multi_perslay_image":
@@ -456,6 +491,15 @@ def main():
             hidden_dim=config["model"]["hidden_dim"],
             weight_type=config["model"].get("weight_type", "learnable_power"),
             weight_hidden_dim=config["model"].get("weight_hidden_dim", 16),
+            weight_threshold=config["model"].get("weight_threshold", 1.0),
+            feature_map_type=config["model"].get(
+                "feature_map_type", "legacy_gaussian"
+            ),
+            normalize=config["model"].get("normalize", False),
+            learnable_sigma=config["model"].get("learnable_sigma", True),
+            flatten_order=config["model"].get(
+                "flatten_order", "legacy-x-major"
+            ),
             dropout=config["model"].get("dropout", 0.0),
         ).to(device)
 
@@ -572,8 +616,13 @@ def main():
 
     if hasattr(model, "perslay") and hasattr(model.perslay.phi, "log_sigma"):
         learned_sigma = torch.exp(model.perslay.phi.log_sigma).detach().cpu()
-        print(f"Learned sigma_x: {learned_sigma[0].item():.6f}")
-        print(f"Learned sigma_y: {learned_sigma[1].item():.6f}")
+        sigma_label = (
+            "Learned"
+            if getattr(model.perslay.phi, "sigma_is_learnable", True)
+            else "Fixed"
+        )
+        print(f"{sigma_label} sigma_x: {learned_sigma[0].item():.6f}")
+        print(f"{sigma_label} sigma_y: {learned_sigma[1].item():.6f}")
     else:
         print("No Gaussian sigma parameters for this model.")
 

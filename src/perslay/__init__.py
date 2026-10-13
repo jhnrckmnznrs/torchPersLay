@@ -18,19 +18,30 @@ from .layers import (
     FlatPerslayPhi,
     GaussianMixturePerslayWeight,
     GaussianPerslayPhi,
+    GridSampledGaussianPerslayPhi,
     GridPerslayWeight,
+    IntegratedGaussianPerslayPhi,
+    LearnableGridIntegratedGaussianPerslayPhi,
     LearnablePowerPerslayWeight,
+    LinearRampPerslayWeight,
     MLPPerslayWeight,
     NormalizedLearnablePowerPerslayWeight,
     Perslay,
+    PersistencePerslayWeight,
     PowerPerslayWeight,
 )
-from .models import FlattenRho, MultiPerslayRegressor, PerslayRegressor
+from .models import (
+    FlattenRho,
+    MultiPerslayRegressor,
+    PerslayRegressor,
+    make_perslay_phi,
+    make_perslay_weight,
+)
 
 try:
     __version__ = version("torchPersLay")
 except Exception:  # pragma: no cover
-    __version__ = "0.1.5"
+    __version__ = "0.4.1"
 
 __all__ = [
     "__version__",
@@ -43,14 +54,21 @@ __all__ = [
     "Perslay",
     "PowerPerslayWeight",
     "ConstantPerslayWeight",
+    "PersistencePerslayWeight",
+    "LinearRampPerslayWeight",
     "LearnablePowerPerslayWeight",
     "NormalizedLearnablePowerPerslayWeight",
     "MLPPerslayWeight",
     "GridPerslayWeight",
     "GaussianMixturePerslayWeight",
     "GaussianPerslayPhi",
+    "GridSampledGaussianPerslayPhi",
+    "IntegratedGaussianPerslayPhi",
+    "LearnableGridIntegratedGaussianPerslayPhi",
     "FlatPerslayPhi",
     "FlattenRho",
     "PerslayRegressor",
     "MultiPerslayRegressor",
+    "make_perslay_weight",
+    "make_perslay_phi",
 ]
