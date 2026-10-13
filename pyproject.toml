@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchPersLay"
-version = "0.1.5"
-description = "A native PyTorch implementation of PersLay for persistence diagrams."
+version = "0.4.1"
+description = "High-performance PyTorch PersLay layers with sampled and exact pixel-integrated persistence representations."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -40,6 +40,8 @@ dependencies = [
 
 [project.optional-dependencies]
 experiments = [
+  "matplotlib",
+  "pandas",
   "pyyaml",
 ]
 

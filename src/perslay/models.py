@@ -4,9 +4,14 @@ import torch.nn as nn
 from .layers import (
     ConstantPerslayWeight,
     GaussianPerslayPhi,
+    GridSampledGaussianPerslayPhi,
+    IntegratedGaussianPerslayPhi,
+    LearnableGridIntegratedGaussianPerslayPhi,
     LearnablePowerPerslayWeight,
+    LinearRampPerslayWeight,
     MLPPerslayWeight,
     NormalizedLearnablePowerPerslayWeight,
+    PersistencePerslayWeight,
     Perslay,
 )
 
@@ -14,6 +19,96 @@ from .layers import (
 class FlattenRho(nn.Module):
     def forward(self, x):
         return x.reshape(x.shape[0], -1)
+
+
+def make_perslay_weight(
+    weight_type,
+    image_bnds,
+    weight_hidden_dim=16,
+    weight_threshold=1.0,
+):
+    if weight_type == "constant":
+        return ConstantPerslayWeight()
+    if weight_type == "persistence":
+        return PersistencePerslayWeight()
+    if weight_type == "linear_ramp":
+        return LinearRampPerslayWeight(threshold=weight_threshold)
+    if weight_type == "learnable_power":
+        return LearnablePowerPerslayWeight(init_scale=1.0, init_power=1.0)
+    if weight_type == "mlp":
+        return MLPPerslayWeight(
+            image_bnds=image_bnds,
+            hidden_dim=weight_hidden_dim,
+        )
+    if weight_type == "normalized_learnable_power":
+        return NormalizedLearnablePowerPerslayWeight(
+            image_bnds=image_bnds,
+            init_scale=1.0,
+            init_power=1.0,
+        )
+    raise ValueError(f"Unknown weight_type: {weight_type}")
+
+
+def make_perslay_phi(
+    feature_map_type,
+    image_size,
+    image_bnds,
+    sigma_x,
+    sigma_y,
+    normalize,
+    learnable_sigma,
+    flatten_order,
+    chunk_size=None,
+    min_cell_fraction=0.05,
+    grid_regularization_strength=0.0,
+    checkpoint_chunks=False,
+):
+    common = {
+        "image_size": image_size,
+        "image_bnds": image_bnds,
+        "sigma_x": sigma_x,
+        "sigma_y": sigma_y,
+        "normalize": normalize,
+    }
+
+    if feature_map_type == "legacy_gaussian":
+        if not learnable_sigma:
+            raise ValueError(
+                "legacy_gaussian always has learnable bandwidths; use "
+                "grid_sampled or integrated for fixed bandwidths"
+            )
+        return GaussianPerslayPhi(**common)
+    if feature_map_type == "grid_sampled":
+        return GridSampledGaussianPerslayPhi(
+            **common,
+            learnable_sigma=learnable_sigma,
+            flatten_order=flatten_order,
+            chunk_size=chunk_size,
+            checkpoint_chunks=checkpoint_chunks,
+        )
+    if feature_map_type == "integrated":
+        return IntegratedGaussianPerslayPhi(
+            **common,
+            learnable_sigma=learnable_sigma,
+            flatten_order=flatten_order,
+            chunk_size=chunk_size,
+            checkpoint_chunks=checkpoint_chunks,
+        )
+    if feature_map_type == "integrated_learnable_grid":
+        return LearnableGridIntegratedGaussianPerslayPhi(
+            **common,
+            learnable_sigma=learnable_sigma,
+            flatten_order=flatten_order,
+            chunk_size=chunk_size,
+            checkpoint_chunks=checkpoint_chunks,
+            min_cell_fraction=min_cell_fraction,
+            grid_regularization_strength=grid_regularization_strength,
+        )
+    raise ValueError(
+        "Unknown feature_map_type: "
+        f"{feature_map_type}. Expected legacy_gaussian, grid_sampled, integrated, "
+        "or integrated_learnable_grid."
+    )
 
 
 class PerslayRegressor(nn.Module):
@@ -26,40 +121,36 @@ class PerslayRegressor(nn.Module):
         hidden_dim=64,
         weight_type="learnable_power",
         weight_hidden_dim=16,
+        weight_threshold=1.0,
+        feature_map_type="legacy_gaussian",
+        normalize=False,
+        learnable_sigma=True,
+        flatten_order="legacy-x-major",
+        chunk_size=None,
+        min_cell_fraction=0.05,
+        grid_regularization_strength=0.0,
+        checkpoint_chunks=False,
     ):
         super().__init__()
-
-        if weight_type == "constant":
-            weight = ConstantPerslayWeight()
-
-        elif weight_type == "learnable_power":
-            weight = LearnablePowerPerslayWeight(
-                init_scale=1.0,
-                init_power=1.0,
-            )
-
-        elif weight_type == "mlp":
-            weight = MLPPerslayWeight(
-                image_bnds=image_bnds,
-                hidden_dim=weight_hidden_dim,
-            )
-
-        elif weight_type == "normalized_learnable_power":
-            weight = NormalizedLearnablePowerPerslayWeight(
-                image_bnds=image_bnds,
-                init_scale=1.0,
-                init_power=1.0,
-            )
-
-        else:
-            raise ValueError(f"Unknown weight_type: {weight_type}")
-
-        phi = GaussianPerslayPhi(
+        weight = make_perslay_weight(
+            weight_type=weight_type,
+            image_bnds=image_bnds,
+            weight_hidden_dim=weight_hidden_dim,
+            weight_threshold=weight_threshold,
+        )
+        phi = make_perslay_phi(
+            feature_map_type=feature_map_type,
             image_size=image_size,
             image_bnds=image_bnds,
             sigma_x=sigma_x,
             sigma_y=sigma_y,
-            normalize=False,
+            normalize=normalize,
+            learnable_sigma=learnable_sigma,
+            flatten_order=flatten_order,
+            chunk_size=chunk_size,
+            checkpoint_chunks=checkpoint_chunks,
+            min_cell_fraction=min_cell_fraction,
+            grid_regularization_strength=grid_regularization_strength,
         )
 
         rho = FlattenRho()
@@ -84,6 +175,12 @@ class PerslayRegressor(nn.Module):
         y = self.regressor(x).squeeze(-1)
         return y
 
+    def regularization_loss(self):
+        regularizer = getattr(self.perslay.phi, "regularization_loss", None)
+        if regularizer is None:
+            return next(self.parameters()).new_zeros(())
+        return regularizer()
+
 
 class MultiPerslayRegressor(nn.Module):
     """
@@ -107,7 +204,16 @@ class MultiPerslayRegressor(nn.Module):
         hidden_dim=64,
         weight_type="learnable_power",
         weight_hidden_dim=16,
+        weight_threshold=1.0,
+        feature_map_type="legacy_gaussian",
+        normalize=False,
+        learnable_sigma=True,
+        flatten_order="legacy-x-major",
+        chunk_size=None,
+        min_cell_fraction=0.05,
+        grid_regularization_strength=0.0,
         dropout=0.0,
+        checkpoint_chunks=False,
     ):
         super().__init__()
 
@@ -125,6 +231,19 @@ class MultiPerslayRegressor(nn.Module):
                 hidden_dim=hidden_dim,
                 weight_type=weight_type,
                 weight_hidden_dim=weight_hidden_dim,
+                weight_threshold=cfg.get("weight_threshold", weight_threshold),
+                feature_map_type=cfg.get("feature_map_type", feature_map_type),
+                normalize=cfg.get("normalize", normalize),
+                learnable_sigma=cfg.get("learnable_sigma", learnable_sigma),
+                flatten_order=cfg.get("flatten_order", flatten_order),
+                chunk_size=cfg.get("chunk_size", chunk_size),
+                checkpoint_chunks=cfg.get("checkpoint_chunks", checkpoint_chunks),
+                min_cell_fraction=cfg.get(
+                    "min_cell_fraction", min_cell_fraction
+                ),
+                grid_regularization_strength=cfg.get(
+                    "grid_regularization_strength", grid_regularization_strength
+                ),
             )
 
             # Use only the PersLay feature extractor from the branch.
@@ -158,3 +277,13 @@ class MultiPerslayRegressor(nn.Module):
         y = self.regressor(x).squeeze(-1)
 
         return y
+
+    def regularization_loss(self):
+        losses = []
+        for branch in self.branches.values():
+            regularizer = getattr(branch.phi, "regularization_loss", None)
+            if regularizer is not None:
+                losses.append(regularizer())
+        if losses:
+            return torch.stack(losses).sum()
+        return next(self.parameters()).new_zeros(())
