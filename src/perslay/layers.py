@@ -666,6 +666,7 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
         chunk_size=None,
         eps=1e-6,
         checkpoint_chunks=False,
+        backward_backend="autograd",
         **kwargs,
     ):
         super().__init__(
@@ -680,6 +681,12 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
             eps=eps,
             checkpoint_chunks=checkpoint_chunks,
         )
+
+        if backward_backend not in ("autograd", "analytic"):
+            raise ValueError("backward_backend must be 'autograd' or 'analytic'")
+        if backward_backend == "analytic" and checkpoint_chunks:
+            raise ValueError("analytical backward and checkpoint_chunks are mutually exclusive")
+        self.backward_backend = backward_backend
 
         nx, ny = self.image_size
         self.register_buffer(
@@ -779,6 +786,10 @@ class IntegratedGaussianPerslayPhi(_ExplicitGridGaussianPhi):
             values = diagrams.new_zeros((batch_size, ny, nx))
             return self._format_aggregated_output(values)
 
+        if self.backward_backend == "analytic":
+            from ._analytic import analytic_weighted_sum
+            return analytic_weighted_sum(self, diagrams, weights, self.chunk_size)
+
         sigma_x, sigma_y = self._sigmas()
         birth, persistence = self._birth_persistence(diagrams)
 
@@ -847,6 +858,7 @@ class LearnableGridIntegratedGaussianPerslayPhi(IntegratedGaussianPerslayPhi):
         grid_regularization_strength=0.0,
         eps=1e-6,
         checkpoint_chunks=False,
+        backward_backend="autograd",
         **kwargs,
     ):
         min_cell_fraction = float(min_cell_fraction)
@@ -871,6 +883,7 @@ class LearnableGridIntegratedGaussianPerslayPhi(IntegratedGaussianPerslayPhi):
             flatten_order=flatten_order,
             chunk_size=chunk_size,
             checkpoint_chunks=checkpoint_chunks,
+            backward_backend=backward_backend,
             eps=eps,
         )
 

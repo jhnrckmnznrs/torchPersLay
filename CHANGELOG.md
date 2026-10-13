@@ -1,3 +1,11 @@
+## 0.5.0 (candidate; CPU validated)
+
+- Add opt-in `backward_backend="analytic"` to exact integrated and learnable-grid persistence-image layers and model factories, retaining the existing autograd default.
+- Compute first-order gradients of point coordinates, learned weights, Gaussian bandwidths, and learned pixel edges with a chunked analytical vector-Jacobian product.
+- Preserve all v0.4.1 checkpoint keys and model defaults; support `torch.load` / `state_dict` across the backend switch.
+- Reject `checkpoint_chunks=True` together with `backward_backend="analytic"` to avoid ambiguous memory settings.
+- Document first-order-only scope and CPU benchmark caveats; experimental Chebyshev interpolation remains outside the stable package.
+
 # Changelog
 
 ## 0.4.1 (release candidate)

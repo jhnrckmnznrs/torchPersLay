@@ -492,3 +492,38 @@ PYTHONPATH=src python benchmarks/benchmark_checkpoint_memory.py
 
 CPU benchmark outcomes and validation limitations are recorded in
 [`VALIDATION_0.4.1.md`](VALIDATION_0.4.1.md).
+
+
+## Optional exact analytical backward (v0.5.0)
+
+For the `integrated` and `integrated_learnable_grid` feature maps, the optional
+`backward_backend="analytic"` avoids retaining intermediate Gaussian factors
+for reverse-mode differentiation. It computes first-order derivatives of diagram
+coordinates, point weights, Gaussian bandwidths, and learned grid edges via an
+analytic vector-Jacobian product. **The mathematical persistence image is
+unchanged**, aside from floating-point summation-order effects.
+
+```python
+from perslay import LearnableGridIntegratedGaussianPerslayPhi
+phi = LearnableGridIntegratedGaussianPerslayPhi(
+    image_size=[80, 80], image_bnds=[[0, 1], [0, 1]],
+    sigma_x=0.1, sigma_y=0.07,
+    backward_backend="analytic", chunk_size=2048,
+)
+# phi.weighted_sum(diagrams, point_weights) uses the optimized reverse pass.
+```
+
+`PerslayRegressor` and `MultiPerslayRegressor` also accept
+`backward_backend="analytic"`; their default remains `"autograd"`.
+Setting `checkpoint_chunks=True` simultaneously with the analytical backend
+raises `ValueError`. With no explicit `chunk_size`, analytical backward uses
+at most 2048 points per recomputation chunk.
+
+**Limitations:** First-order reverse-mode gradients only (no double backward),
+no `torch.func` transforms, no CUDA or AMP validation at the time of this release
+candidate. For higher-order differentiation, `torch.func`, or unsupported
+configurations, choose `backward_backend="autograd"` explicitly. The backend
+is not embedded in `state_dict`, so weights remain interoperable.
+
+The experimental Chebyshev approximation is kept separately from the exact
+release candidate because its error depends strongly on Gaussian bandwidth.

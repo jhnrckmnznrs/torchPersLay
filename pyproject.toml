@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchPersLay"
-version = "0.4.1"
+version = "0.5.0"
 description = "High-performance PyTorch PersLay layers with sampled and exact pixel-integrated persistence representations."
 readme = "README.md"
 requires-python = ">=3.9"
